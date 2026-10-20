@@ -106,7 +106,7 @@ jobs:
           ls /tmp/xnu-old/iokit/DriverKit | head -5
           ls /tmp/xnu-old2/EXTERNAL_HEADERS/TrustCache | head -5
 
-      - name: Build kernel      - name: Build kernel
+      - name: Build kernel
         run: |
           cd UniXNU
           ./unixnu build kernel
