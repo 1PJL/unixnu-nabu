@@ -101,14 +101,6 @@ jobs:
             -o ".cache/sources/xnu-trustcache-$TSHORT.json"
           echo "=== cached json ==="
           ls -la .cache/sources/
-          echo "=== clone old tags into /tmp ==="
-          rm -rf /tmp/xnu-old /tmp/xnu-old2
-          git clone --depth 1 --branch "$TAG" https://github.com/apple-oss-distributions/xnu.git /tmp/xnu-old
-          git clone --depth 1 --branch "$TRUST_TAG" https://github.com/apple-oss-distributions/xnu.git /tmp/xnu-old2
-          echo "=== /tmp content ==="
-          ls /tmp/xnu-old/iokit/DriverKit | head -5
-          ls /tmp/xnu-old2/EXTERNAL_HEADERS/TrustCache | head -5
-
       - name: Build kernel
         run: |
           cd UniXNU
