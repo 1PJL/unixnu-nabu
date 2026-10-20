@@ -69,12 +69,15 @@ jobs:
       - name: Build corecrypto (missing step in upstream script)
         run: |
           cd UniXNU/out/nabu/tree
-          echo "=== 閾炬帴 corecrypto 婧愮爜锛坱ree 涓嶄細鑷姩澶嶅埗锛?=="
+          echo "=== 闁剧偓甯?corecrypto 濠ф劗鐖滈敍鍧眗ee 娑撳秳绱伴懛顏勫З婢跺秴鍩楅敍?=="
           mkdir -p refer
           SRC=$(ls -d ../../feeds/corecrypto-2023-* 2>/dev/null | head -1)
           echo "SRC=$SRC"
           if [ -n "$SRC" ]; then ln -sfn "$(cd "$SRC" && pwd)" refer/corecrypto-2023; fi
           ls -d refer/corecrypto-2023 2>/dev/null || echo "(still missing)"
+          echo "=== pass 1: plain provider ==="
+          python3 scripts/build-corecrypto-14.py
+          echo "=== pass 2: namespaced provider ==="
           python3 scripts/build-corecrypto-14.py --namespace
           echo "=== output ==="
           ls -lh build/corecrypto-2023/ || true
