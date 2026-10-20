@@ -29,6 +29,8 @@ defconfig = "nabu_defconfig"
 archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
+  "build-arm-driver.py ArmDTPlatform",
+  "build-arm-driver.py ArmCpu",
 ]
 
 [kernel.prelink]
