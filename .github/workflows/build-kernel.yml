@@ -22,7 +22,7 @@ jobs:
 
       - name: Clone UniXNU
         run: |
-          git clone --recurse-submodules --depth 1 --shallow-submodules https://github.com/UniXNU/UniXNU.git UniXNU
+          git clone --recurse-submodules --depth 1 --shallow-submodules https://github.com/Lux12138/UniXNU.git UniXNU
 
       - name: Select defconfig
         run: |
