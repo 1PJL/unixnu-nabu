@@ -66,6 +66,16 @@ jobs:
           print("total:", patched)
           PY
 
+      - name: Build corecrypto (missing step in upstream script)
+        run: |
+          cd UniXNU/out/nabu/tree
+          echo "=== refer/corecrypto-2023 ==="
+          ls -d refer/corecrypto-2023 2>/dev/null || echo "(missing source)"
+          python3 scripts/build-corecrypto-14.py --namespace
+          echo "=== output ==="
+          ls -lh build/corecrypto-2023/ || true
+        timeout-minutes: 40
+
       - name: Build kernel
         run: |
           cd UniXNU
