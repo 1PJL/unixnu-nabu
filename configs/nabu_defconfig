@@ -1,10 +1,9 @@
 # nabu_defconfig
-# build-arm-driver.py 在 main 分支缺失，ArmDTPlatform/ArmCpu 驱动无法编译
-# 先只保留 corecrypto + pthread，把内核编出来验证链路
+# 只保留 corecrypto（已验证可编译）。pthread 需要 link.filelist 做符号隔离检查，
+# 而 bootstrap pass 到不了最终链接阶段，所以暂时去掉。
 
 CONFIG_XNU_NATIVE_PAN=y
 CONFIG_XNU_DT_PANIC_REGION=y
 CONFIG_XNU_SOURCE_CORECRYPTO14=y
-CONFIG_XNU_SOURCE_PTHREAD=y
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 CONFIG_XNU_OWNER_DATA_VOLUME_UUID="BEC2158A-350E-4F2E-B87E-A0E69FB0BDEA"
