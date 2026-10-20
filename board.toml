@@ -1,5 +1,6 @@
-# UniXNU nabu 閻犱焦鍎抽ˇ顒佺閹惧磭姘?闁?濞寸姴鎳愰弫銈嗙鎼粹剝韬?GitHub Actions 濞戞挸锕︾槐顏嗘嫚?XNU 闁告劕鎳忛悧?#
-# 缂傚倹鐗曢崬鎾冀缁嬪灝娑ч梻鍥ｅ亾閻熸洑绶ょ槐鐧怭SW 闂婎剦鍋傞崬?+ kernelcache 闁告繂鐗嗙粭?+ defconfig闁?# 闁告帒妫楃亸顖炲礄閻樿京绉?/ ADT / payload 閺夆晜鐟ょ花铏圭驳婢跺﹤鏁堕柡宥囶焾閸ゎ參寮堕妷銉﹀€甸柛鎰Х钘熼柨娑樼墦濞撳墎鎲版担鐑樺焸闁哄牆鎼悿鍕圭€ｅ墎绀嗛柕?
+# UniXNU device repo for Xiaomi Pad 5 (nabu)
+# Only the kernel build path is configured; userdata geometry needs on-device measurement.
+
 [board]
 name = "nabu"
 soc = "SM8150"
@@ -22,7 +23,10 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustC
 
 [kernel]
 defconfig = "nabu_defconfig"
-# 閸愬懏鐗抽柧鐐复閹碘偓闂団偓閻ㄥ嫬缍婂锝嗙€鍝勬珤閿涘本瀵滄い鍝勭碍閹笛嗩攽閿涘牏鍙?sheng 閻ㄥ嫮绮ㄩ弸鍕剁礉閸欘亙绻氶悾?nabu 瑜版挸澧犻崥顖滄暏閻ㄥ嫸绱?archives = [
+# Archive builders run in order before the kernel link.
+# build-arm-driver.py is absent from the main branch, and libpthread needs link.filelist
+# which a bootstrap pass never reaches, so only corecrypto is built here.
+archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
 ]
@@ -37,24 +41,15 @@ roots = [
   "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
   "com.apple.driver.AppleARMPlatform",
   "com.apple.driver.AppleARMWatchdogTimer",
-  "com.apple.driver.AppleAudioClockLibs",
   "com.apple.driver.AppleEffaceableStorage",
-  "com.apple.driver.AppleIISController",
-  "com.apple.driver.AppleM2ScalerCSCDriver",
   "com.apple.driver.AppleMobileFileIntegrity",
   "com.apple.driver.ApplePMGR",
   "com.apple.driver.IODARTFamily",
   "com.apple.filesystems.apfs",
-  "com.apple.iokit.CoreAnalyticsFamily",
-  "com.apple.iokit.IOAVFamily",
-  "com.apple.iokit.IOAudio2Family",
-  "com.apple.iokit.IOCECFamily",
   "com.apple.iokit.IOCryptoAcceleratorFamily",
   "com.apple.iokit.IOGPUFamily",
-  "com.apple.iokit.IOHDCPFamily",
   "com.apple.iokit.IOMobileGraphicsFamily",
   "com.apple.iokit.IOReportFamily",
-  "com.apple.iokit.IOSlowAdaptiveClockingFamily",
   "com.apple.iokit.IOStorageFamily",
   "com.apple.iokit.IOSurface",
   "com.apple.kec.Libm",
@@ -64,5 +59,4 @@ roots = [
   "com.apple.security.AppleImage4",
   "com.apple.security.sandbox",
   "com.apple.iokit.IOHIDFamily",
-  "com.apple.iokit.IOHIDEventDriver",
 ]
