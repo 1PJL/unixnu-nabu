@@ -1,8 +1,6 @@
-# UniXNU nabu 设备仓库 — 仅用于在 GitHub Actions 上编译 XNU 内核
+# UniXNU nabu 璁惧浠撳簱 鈥?浠呯敤浜庡湪 GitHub Actions 涓婄紪璇?XNU 鍐呮牳
 #
-# 编内核只需要：IPSW 身份 + kernelcache 哈希 + defconfig。
-# 分区几何 / ADT / payload 这些等内核出来后再补（需要真机实测）。
-
+# 缂栧唴鏍稿彧闇€瑕侊細IPSW 韬唤 + kernelcache 鍝堝笇 + defconfig銆?# 鍒嗗尯鍑犱綍 / ADT / payload 杩欎簺绛夊唴鏍稿嚭鏉ュ悗鍐嶈ˉ锛堥渶瑕佺湡鏈哄疄娴嬶級銆?
 [board]
 name = "nabu"
 soc = "SM8150"
@@ -25,6 +23,14 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustC
 
 [kernel]
 defconfig = "nabu_defconfig"
+# 内核链接所需的归档构建器，按顺序执行（照 sheng 的结构，只保留 nabu 当前启用的）
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "build-arm-driver.py ArmDTPlatform",
+  "build-arm-driver.py ArmCpu",
+  "build-libpthread-kernel.py",
+]
 
 [kernel.prelink]
 tool = "kits/NativePrelink/emit_prelink.py"
