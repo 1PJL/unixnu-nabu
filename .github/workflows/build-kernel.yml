@@ -59,27 +59,41 @@ jobs:
           ./unixnu tree
         timeout-minutes: 30
 
-      - name: 预缓存 DriverKit 头文件清单（绕过 GitHub API 限流）
+      - name: 给 API 脚本注入 GITHUB_TOKEN（绕过匿名限流）
         run: |
           cd UniXNU/out/nabu/tree
-          mkdir -p .cache/sources
-          TAG="xnu-10063.121.3"
-          SHORT="${TAG#xnu-}"
-          echo "TAG=$TAG  SHORT=$SHORT"
-          curl -sL --fail \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/apple-oss-distributions/xnu/contents/iokit/DriverKit?ref=${TAG}" \
-            -o ".cache/sources/xnu-driverkit-${SHORT}.json"
-          curl -sL --fail \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/apple-oss-distributions/xnu/contents/iokit/DriverKit/crypto?ref=${TAG}" \
-            -o ".cache/sources/xnu-driverkit-crypto-${SHORT}.json"
-          echo "=== 缓存文件 ==="
-          ls -la .cache/sources/
-          echo "=== 校验（前 100 字节）==="
-          head -c 100 ".cache/sources/xnu-driverkit-${SHORT}.json"; echo
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, glob
+          token = os.environ.get("GITHUB_TOKEN", "")
+          print("token present:", bool(token))
+          patched = 0
+          for f in glob.glob("scripts/*.py"):
+              p = Path(f)
+              s = p.read_text()
+              if "api.github.com" not in s or "_UNIXNU_TOKEN_PATCH" in s:
+                  continue
+              if "import urllib.request" not in s:
+                  continue
+              patch = '''import urllib.request
+# _UNIXNU_TOKEN_PATCH: authenticated opener for GitHub API
+_gh_token = __import__("os").environ.get("GITHUB_TOKEN", "")
+if _gh_token:
+    _orig_urlopen = urllib.request.urlopen
+    def _urlopen(url, *a, **kw):
+        req = urllib.request.Request(url) if isinstance(url, str) else url
+        req.add_header("Authorization", "Bearer " + _gh_token)
+        req.add_header("Accept", "application/vnd.github+json")
+        return _orig_urlopen(req, *a, **kw)
+    urllib.request.urlopen = _urlopen'''
+              s = s.replace("import urllib.request", patch, 1)
+              p.write_text(s)
+              patched += 1
+              print("patched:", f)
+          print("total patched:", patched)
+          PY
+          echo "=== 验证 ==="
+          grep -c "_UNIXNU_TOKEN_PATCH" scripts/*.py 2>/dev/null || echo "(无匹配)"
 
       - name: 编译 XNU 内核
         run: |
