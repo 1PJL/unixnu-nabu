@@ -5,13 +5,26 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-14
     timeout-minutes: 350
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select Xcode 16
+        run: |
+          echo "=== 可用 Xcode ==="
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo "(none)"
+          XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XC" ]; then
+            echo "选择 $XC"
+            sudo xcode-select -s "$XC/Contents/Developer"
+          else
+            echo "没有 Xcode 16，保持默认"
+          fi
+          xcodebuild -version
 
       - name: Environment check
         run: |
