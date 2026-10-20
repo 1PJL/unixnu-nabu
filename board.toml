@@ -31,6 +31,9 @@ archives = [
   "build-corecrypto-14.py --namespace",
   "build-arm-driver.py ArmDTPlatform",
   "build-arm-driver.py ArmCpu",
+  "build-arm-driver.py NativeAES",
+  "build-arm-driver.py NativeRamBlock",
+  "build-arm-driver.py NativeHidInput",
 ]
 
 [kernel.prelink]
