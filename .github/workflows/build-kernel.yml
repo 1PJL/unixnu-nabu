@@ -1,0 +1,73 @@
+name: build-xnu-kernel
+
+# 在 GitHub 的 macOS 机器上编译 UniXNU 的 XNU 内核（nabu 版）
+# 触发方式：仓库页面 → Actions → build-xnu-kernel → Run workflow
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 350
+
+    steps:
+      - name: 检出设备仓库
+        uses: actions/checkout@v4
+
+      - name: 环境自检
+        run: |
+          echo "=== Xcode ==="
+          xcodebuild -version
+          echo "=== Python ==="
+          python3 --version
+          echo "=== 磁盘 ==="
+          df -h /
+          echo "=== 架构 ==="
+          uname -m
+
+      - name: 克隆 UniXNU 主仓库
+        run: |
+          git clone --recurse-submodules --depth 1 --shallow-submodules \
+            https://github.com/UniXNU/UniXNU.git UniXNU
+          echo "=== 仓库大小 ==="
+          du -sh UniXNU
+
+      - name: 选择 defconfig
+        run: |
+          cd UniXNU
+          chmod +x unixnu
+          ./unixnu defconfig nabu_defconfig -D "$GITHUB_WORKSPACE"
+
+      - name: 拉取源码依赖
+        run: |
+          cd UniXNU
+          ./unixnu fetch
+        timeout-minutes: 60
+
+      - name: 拉取 IPSW 组件
+        run: |
+          cd UniXNU
+          ./unixnu ipsw fetch
+          echo "=== 磁盘剩余 ==="
+          df -h /
+        timeout-minutes: 60
+
+      - name: 编译 XNU 内核
+        run: |
+          cd UniXNU
+          ./unixnu build kernel
+          echo "=== 产物 ==="
+          ls -lh out/nabu/kernel/ || true
+        timeout-minutes: 180
+
+      - name: 上传 kernel.macho
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-nabu
+          path: |
+            UniXNU/out/nabu/kernel/
+            UniXNU/out/nabu/logs/
+          if-no-files-found: warn
+          retention-days: 30
