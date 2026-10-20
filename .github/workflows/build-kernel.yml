@@ -21,10 +21,13 @@ jobs:
           echo "picked: $XC"
           if [ -n "$XC" ]; then
             sudo xcode-select -s "$XC/Contents/Developer"
+            echo "DEVELOPER_DIR=$XC/Contents/Developer" >> $GITHUB_ENV
+            echo "exported DEVELOPER_DIR=$XC/Contents/Developer"
           else
-            echo "no Xcode 16 found, keeping default"
+            echo "no Xcode 16 found"
           fi
           xcodebuild -version
+          xcrun --find clang
       - name: Environment check
         run: |
           xcodebuild -version
