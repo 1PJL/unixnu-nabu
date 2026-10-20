@@ -15,17 +15,16 @@ jobs:
 
       - name: Select Xcode 16
         run: |
-          echo "=== 鍙敤 Xcode ==="
-          ls -d /Applications/Xcode*.app 2>/dev/null || echo "(none)"
+          echo "=== available Xcode ==="
+          ls -d /Applications/Xcode*.app 2>/dev/null || echo none
           XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1)
+          echo "picked: $XC"
           if [ -n "$XC" ]; then
-            echo "閫夋嫨 $XC"
             sudo xcode-select -s "$XC/Contents/Developer"
           else
-            echo "娌℃湁 Xcode 16锛屼繚鎸侀粯璁?
+            echo "no Xcode 16 found, keeping default"
           fi
           xcodebuild -version
-
       - name: Environment check
         run: |
           xcodebuild -version
