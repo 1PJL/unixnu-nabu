@@ -1,10 +1,7 @@
 # nabu_defconfig
-# CORECRYPTO14 必须开着：unixnu tree 只复制启用的源，关了就没有 corecrypto 源码
-# BOOT_PROGRESS 不开：它额外要求 XNU_NATIVE_UFS，而 SM8150 的 UFS 驱动还没移植
+# build-arm-driver.py 在 main 分支缺失，ArmDTPlatform/ArmCpu 驱动无法编译
+# 先只保留 corecrypto + pthread，把内核编出来验证链路
 
-CONFIG_XNU_ARM_DT_PLATFORM=y
-CONFIG_XNU_ARMCPU=y
-CONFIG_XNU_NATIVE_ARCH_TIMER=y
 CONFIG_XNU_NATIVE_PAN=y
 CONFIG_XNU_DT_PANIC_REGION=y
 CONFIG_XNU_SOURCE_CORECRYPTO14=y

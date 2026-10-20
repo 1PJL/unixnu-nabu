@@ -1,6 +1,5 @@
-# UniXNU nabu 璁惧浠撳簱 鈥?浠呯敤浜庡湪 GitHub Actions 涓婄紪璇?XNU 鍐呮牳
-#
-# 缂栧唴鏍稿彧闇€瑕侊細IPSW 韬唤 + kernelcache 鍝堝笇 + defconfig銆?# 鍒嗗尯鍑犱綍 / ADT / payload 杩欎簺绛夊唴鏍稿嚭鏉ュ悗鍐嶈ˉ锛堥渶瑕佺湡鏈哄疄娴嬶級銆?
+# UniXNU nabu 鐠佹儳顦禒鎾崇氨 閳?娴犲懐鏁ゆ禍搴℃躬 GitHub Actions 娑撳﹦绱拠?XNU 閸愬懏鐗?#
+# 缂傛牕鍞撮弽绋垮涧闂団偓鐟曚緤绱癐PSW 闊偂鍞?+ kernelcache 閸濆牆绗?+ defconfig閵?# 閸掑棗灏崙鐘辩秿 / ADT / payload 鏉╂瑤绨虹粵澶婂敶閺嶇鍤弶銉ユ倵閸愬秷藟閿涘牓娓剁憰浣烘埂閺堝搫鐤勫ù瀣剁礆閵?
 [board]
 name = "nabu"
 soc = "SM8150"
@@ -23,12 +22,10 @@ fetch = ["KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustC
 
 [kernel]
 defconfig = "nabu_defconfig"
-# 内核链接所需的归档构建器，按顺序执行（照 sheng 的结构，只保留 nabu 当前启用的）
+# 鍐呮牳閾炬帴鎵€闇€鐨勫綊妗ｆ瀯寤哄櫒锛屾寜椤哄簭鎵ц锛堢収 sheng 鐨勭粨鏋勶紝鍙繚鐣?nabu 褰撳墠鍚敤鐨勶級
 archives = [
   "build-corecrypto-14.py",
   "build-corecrypto-14.py --namespace",
-  "build-arm-driver.py ArmDTPlatform",
-  "build-arm-driver.py ArmCpu",
   "build-libpthread-kernel.py",
 ]
 
