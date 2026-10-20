@@ -9,6 +9,7 @@ jobs:
     timeout-minutes: 350
     env:
       GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+      UNIXNU_DEBUG_LDFILELIST: "1"
       GH_TOKEN: ${{ secrets.GH_PAT }}
     steps:
       - uses: actions/checkout@v4
