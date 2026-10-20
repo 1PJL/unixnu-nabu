@@ -78,6 +78,38 @@ jobs:
           print("total:", patched)
           PY
 
+      - name: Pre-cache XNU DriverKit headers (avoid all API calls)
+        run: |
+          cd UniXNU/out/nabu/tree
+          mkdir -p .cache/sources
+          TAG="xnu-10063.121.3"
+          TRUST_TAG="xnu-8796.101.5"
+          SHORT=${TAG#xnu-}
+          TSHORT=${TRUST_TAG#xnu-}
+          echo "TAG=$TAG TRUST_TAG=$TRUST_TAG"
+          curl -sL --fail -H "Authorization: Bearer ${{ secrets.GH_PAT }}" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/apple-oss-distributions/xnu/contents/iokit/DriverKit?ref=$TAG" \
+            -o ".cache/sources/xnu-driverkit-$SHORT.json"
+          curl -sL --fail -H "Authorization: Bearer ${{ secrets.GH_PAT }}" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/apple-oss-distributions/xnu/contents/iokit/DriverKit/crypto?ref=$TAG" \
+            -o ".cache/sources/xnu-driverkit-crypto-$SHORT.json"
+          curl -sL --fail -H "Authorization: Bearer ${{ secrets.GH_PAT }}" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/apple-oss-distributions/xnu/contents/EXTERNAL_HEADERS/TrustCache?ref=$TRUST_TAG" \
+            -o ".cache/sources/xnu-trustcache-$TSHORT.json"
+          echo "=== cached json ==="
+          ls -la .cache/sources/
+          echo "=== fetch old tag for DriverKit + TrustCache ==="
+          rm -rf /tmp/xnu-old
+          git clone --depth 1 --branch "$TAG" https://github.com/apple-oss-distributions/xnu.git /tmp/xnu-old
+          mkdir -p .cache/xnu-work/iokit/DriverKit .cache/xnu-work/EXTERNAL_HEADERS
+          cp -R /tmp/xnu-old/iokit/DriverKit/. .cache/xnu-work/iokit/DriverKit/ 2>/dev/null || true
+          rm -rf /tmp/xnu-old2
+          git clone --depth 1 --branch "$TRUST_TAG" https://github.com/apple-oss-distributions/xnu.git /tmp/xnu-old2
+          cp -R /tmp/xnu-old2/EXTERNAL_HEADERS/TrustCache .cache/xnu-work/EXTERNAL_HEADERS/ 2>/dev/null || true
+          echo "=== headers in place ==="
+          ls .cache/xnu-work/iokit/DriverKit | head -5
+          ls .cache/xnu-work/EXTERNAL_HEADERS/TrustCache | head -5
+
       - name: Build kernel
         run: |
           cd UniXNU
