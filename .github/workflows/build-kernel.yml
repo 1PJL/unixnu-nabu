@@ -1,8 +1,5 @@
 name: build-xnu-kernel
 
-# 在 GitHub 的 macOS 机器上编译 UniXNU 的 XNU 内核（nabu 版）
-# 触发方式：仓库页面 → Actions → build-xnu-kernel → Run workflow
-
 on:
   workflow_dispatch:
 
@@ -10,56 +7,39 @@ jobs:
   build:
     runs-on: macos-14
     timeout-minutes: 350
-
     steps:
-      - name: 检出设备仓库
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: 环境自检
+      - name: Environment check
         run: |
-          echo "=== Xcode ==="
           xcodebuild -version
-          echo "=== Python ==="
           python3 --version
-          echo "=== 磁盘 ==="
-          df -h /
-          echo "=== 架构 ==="
           uname -m
+          df -h /
 
-      - name: 克隆 UniXNU 主仓库
+      - name: Clone UniXNU
         run: |
-          git clone --recurse-submodules --depth 1 --shallow-submodules \
-            https://github.com/UniXNU/UniXNU.git UniXNU
-          echo "=== 仓库大小 ==="
-          du -sh UniXNU
+          git clone --recurse-submodules --depth 1 --shallow-submodules https://github.com/UniXNU/UniXNU.git UniXNU
 
-      - name: 选择 defconfig
+      - name: Select defconfig
         run: |
           cd UniXNU
           chmod +x unixnu
           ./unixnu defconfig nabu_defconfig -D "$GITHUB_WORKSPACE"
 
-      - name: 拉取源码依赖
-        run: |
-          cd UniXNU
-          ./unixnu fetch
+      - name: Fetch sources
+        run: cd UniXNU && ./unixnu fetch
         timeout-minutes: 60
 
-      - name: 拉取 IPSW 组件
-        run: |
-          cd UniXNU
-          ./unixnu ipsw fetch
-          echo "=== 磁盘剩余 ==="
-          df -h /
+      - name: Fetch IPSW
+        run: cd UniXNU && ./unixnu ipsw fetch
         timeout-minutes: 60
 
-      - name: 组装构建树
-        run: |
-          cd UniXNU
-          ./unixnu tree
+      - name: Assemble tree
+        run: cd UniXNU && ./unixnu tree
         timeout-minutes: 30
 
-      - name: 给 API 脚本注入 GITHUB_TOKEN（绕过匿名限流）
+      - name: Inject GITHUB_TOKEN into API scripts
         run: |
           cd UniXNU/out/nabu/tree
           python3 - <<'PY'
@@ -75,47 +55,28 @@ jobs:
                   continue
               if "import urllib.request" not in s:
                   continue
-              patch = '''import urllib.request
-# _UNIXNU_TOKEN_PATCH: authenticated opener for GitHub API
-_gh_token = __import__("os").environ.get("GITHUB_TOKEN", "")
-if _gh_token:
-    _orig_urlopen = urllib.request.urlopen
-    def _urlopen(url, *a, **kw):
-        req = urllib.request.Request(url) if isinstance(url, str) else url
-        req.add_header("Authorization", "Bearer " + _gh_token)
-        req.add_header("Accept", "application/vnd.github+json")
-        return _orig_urlopen(req, *a, **kw)
-    urllib.request.urlopen = _urlopen'''
+              patch = "import urllib.request\n_gh_token = __import__(\"os\").environ.get(\"GITHUB_TOKEN\", \"\")\nif _gh_token:\n    _orig_urlopen = urllib.request.urlopen\n    def _urlopen(url, *a, **kw):\n        req = urllib.request.Request(url) if isinstance(url, str) else url\n        req.add_header(\"Authorization\", \"Bearer \" + _gh_token)\n        req.add_header(\"Accept\", \"application/vnd.github+json\")\n        return _orig_urlopen(req, *a, **kw)\n    urllib.request.urlopen = _urlopen"
               s = s.replace("import urllib.request", patch, 1)
               p.write_text(s)
               patched += 1
               print("patched:", f)
-          print("total patched:", patched)
+          print("total:", patched)
           PY
-          echo "=== 验证 ==="
-          grep -c "_UNIXNU_TOKEN_PATCH" scripts/*.py 2>/dev/null || echo "(无匹配)"
 
-      - name: 编译 XNU 内核
+      - name: Build kernel
         run: |
           cd UniXNU
           ./unixnu build kernel
-          echo "=== 产物 ==="
           ls -lh out/nabu/kernel/ || true
         timeout-minutes: 180
 
-      - name: 显示内核构建日志（失败时）
+      - name: Dump build log on failure
         if: failure()
         run: |
           echo "===== kernel-bootstrap.log ====="
-          cat UniXNU/out/nabu/logs/kernel-bootstrap.log 2>/dev/null | tail -80 || echo "(文件不存在)"
-          echo ""
-          echo "===== logs 目录 ====="
-          ls -la UniXNU/out/nabu/logs/ 2>/dev/null || echo "(目录不存在)"
-          echo ""
-          echo "===== out/nabu 结构 ====="
-          find UniXNU/out/nabu -maxdepth 2 -type d 2>/dev/null | head -30
+          tail -100 UniXNU/out/nabu/logs/kernel-bootstrap.log 2>/dev/null || echo "(missing)"
 
-      - name: 上传 kernel.macho
+      - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -124,4 +85,3 @@ if _gh_token:
             UniXNU/out/nabu/kernel/
             UniXNU/out/nabu/logs/
           if-no-files-found: warn
-          retention-days: 30
