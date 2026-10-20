@@ -61,6 +61,18 @@ jobs:
           ls -lh out/nabu/kernel/ || true
         timeout-minutes: 180
 
+      - name: 显示内核构建日志（失败时）
+        if: failure()
+        run: |
+          echo "===== kernel-bootstrap.log ====="
+          cat UniXNU/out/nabu/logs/kernel-bootstrap.log 2>/dev/null | tail -80 || echo "(文件不存在)"
+          echo ""
+          echo "===== logs 目录 ====="
+          ls -la UniXNU/out/nabu/logs/ 2>/dev/null || echo "(目录不存在)"
+          echo ""
+          echo "===== out/nabu 结构 ====="
+          find UniXNU/out/nabu -maxdepth 2 -type d 2>/dev/null | head -30
+
       - name: 上传 kernel.macho
         if: always()
         uses: actions/upload-artifact@v4
