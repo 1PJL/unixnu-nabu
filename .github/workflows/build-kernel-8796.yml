@@ -51,6 +51,11 @@ jobs:
           git -C dxb checkout -q FETCH_HEAD
           # patches and their staging scripts go next to blacktop's
           cp xnu-8796/patches/*.patch xnu-8796/patches/*.sh dxb/patches/
+          # the patch set was staged from a Windows checkout: patch(1) rejects CRLF
+          for f in dxb/patches/*.patch dxb/patches/*.sh; do
+            perl -pi -e 's/\r$//' "$f"
+          done
+          grep -lc $'\r' dxb/patches/*.patch 2>/dev/null | head -3 || echo "no CRLF left"
           # libfirehose_kernel is arm64e-only; the NABU kernel is plain arm64
           sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
           grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
