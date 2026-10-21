@@ -63,6 +63,22 @@ slot 321  writeAon(uint64_t)
 这和 sheng 的做法一致：`sheng-platform-power.patch` 只是在 `bsd_init.c` 里
 加了一句 `sheng_pmgr_run()`。
 
+## 2.5 RPMh 最小读通路（下一段代码的目标）
+
+```
+cmd-db(0x85f20000) 里按 "active"/"wake"/"sleep" 查到 TCS 基址
+        ↓
+组 AMC 命令 16 字节：{ msg_id, addr, data, wait | cmd<<28 }
+        ↓
+写 bank + RSC_DRV_CTL_TCS_DATA_HI(0x38) / LO(0x40)，置 TCS_AMC_MODE_ENABLE(BIT16)
+        ↓
+等 DRV completion（或 SMEM 里的 ack 通道）
+        ↓
+回读 data → 这就是 XNU 想要的"电源域状态/电压/时钟"
+```
+
+判定成功不是"不崩"，而是**能打印出非 0 的真实电压/时钟值**。
+
 ## 3. 实施顺序
 
 1. `kits/nabu/NabuPlatformPower.cpp` 骨架（本次已放）
