@@ -1,5 +1,5 @@
 # nabu_defconfig
-# build-arm-driver.py 鐎规瓕寮撶划?UniXNU-sheng 缂佸绮ˇ鏌ユ晬鐏炶棄璁茬紓?ArmDTPlatform/ArmCpu
+# build-arm-driver.py 閻庤鐡曞鎾跺垝?UniXNU-sheng 缂備礁顦辩划顖炈囬弻銉︽櫖閻忕偠妫勭拋鑼磽?ArmDTPlatform/ArmCpu
 
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
@@ -9,4 +9,3 @@ CONFIG_XNU_DT_PANIC_REGION=y
 CONFIG_XNU_SOURCE_CORECRYPTO14=y
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 CONFIG_XNU_OWNER_DATA_VOLUME_UUID="BEC2158A-350E-4F2E-B87E-A0E69FB0BDEA"
-CONFIG_XNU_NATIVE_UFS=y
