@@ -5,6 +5,8 @@ set -e
 K="${1:?kernel.macho}"
 A="${2:?kernel.macho.adt}"
 OUT="${3:-cust-payload.img}"
+# Resolve before any cd: a relative $OUT must not resolve inside $STAGE later.
+OUT_ABS=$(readlink -f "$OUT")
 
 STAGE=$(mktemp -d)
 mkdir -p "$STAGE/EFI/UniXNU/Payloads"
@@ -37,7 +39,7 @@ TOML
 rm -f "$OUT"
 dd if=/dev/zero of="$OUT" bs=1M count=64 status=none
 mkfs.vfat -n NABUCUST "$OUT" > /dev/null
-( cd "$STAGE" && mcopy -i "$(readlink -f "$OUT")" -s EFI ::/ )
+( cd "$STAGE" && mcopy -i "$OUT_ABS" -s EFI ::/ )
 
 echo "=== 内容校验 ==="
 mdir -i "$OUT" -/ ::/EFI/UniXNU/Payloads
