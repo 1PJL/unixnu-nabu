@@ -95,10 +95,52 @@ else if (RamdiskOffset != MAX_UINTN) { Status = EFI_UNSUPPORTED; goto Fail; }
 ```
 ✅ 生成 ADT 时**不要** `--data-ramdisk` / `--packed-data-ramdisk`，使 `rd=ffffffffffffffff keep=0`
 
-### 坑 8：`boot_args.Video` 数组错位（已修）
-`BootVideo.h` 原写 `[base, 1, rowBytes, width, height, 32]`，XNU 期望 `[base, rowBytes, width, height, depth, display]`
+### 坑 8：`boot_args.Video` 布局（⚠️ 之前的结论有错，见下）
+`BootVideo.h` 原写 `[base, 1, rowBytes, width, height, 32]`，当时认为 XNU 期望
+`[base, rowBytes, width, height, depth, display]`
 → 内核读到 `rowBytes=1 / depth=2560` → `initialize_screen()` 失败 → **静默切回串口**
-✅ 已修正（并同步改 DarwinBoot 绘制下标）；实测现值 `base=0x50000000 row=6400 1600x2560 depth=32`
+✅ 改写过一次（并同步改 DarwinBoot 绘制下标）；DarwinBoot 侧自报 `base=0x50000000 row=6400 1600x2560 depth=32`
+
+> **⚠️ 更正（本次会话核实）**：xnu-10063.141.1 的 `boot_args.Video` **不是数组**，是
+> `struct Boot_Video`，定义在 `pexpert/pexpert/arm64/boot.h:31-38`：
+> ```c
+> struct Boot_Video {
+>     unsigned long v_baseAddr;  // [0]
+>     unsigned long v_display;   // [1]  ← 第 2 个！不是最后一个
+>     unsigned long v_rowBytes;  // [2]
+>     unsigned long v_width;     // [3]
+>     unsigned long v_height;    // [4]
+>     unsigned long v_depth;     // [5]
+> };
+> ```
+> 而 `pexpert/arm/pe_init.c:419-429` 是按**字段名**逐个取的：
+> ```c
+> PE_state.video.v_baseAddr = boot_args_ptr->Video.v_baseAddr;
+> PE_state.video.v_display  = boot_args_ptr->Video.v_display;
+> PE_state.video.v_rowBytes = boot_args_ptr->Video.v_rowBytes;
+> PE_state.video.v_width    = ...->Video.v_width;
+> PE_state.video.v_height   = ...->Video.v_height;
+> PE_state.video.v_depth    = (...->Video.v_depth >> 0) & 0xFF;   // 低 8 位才是深度
+> PE_state.video.v_rotate   = (v_depth>>8 & 0xFF) + (v_depth>>24 & 0xFF);
+> PE_state.video.v_scale    = ((v_depth>>16) & 0xFF) + 1;
+> ```
+> 也就是说：**如果 DarwinBoot 真按 `[base, rowBytes, width, height, depth, display]` 写**，
+> 内核会读到 `v_display=rowBytes(非 0，于是走 graphics)、v_rowBytes=width、
+> v_width=height、v_height=depth、v_depth=display位段全 0` ——
+> **整条 video 参数全错位**，`vcattach` 拿到的行宽/宽高都是错的，表现就是"没有输出"。
+>
+> ⇒ 这**很可能**才是"内核在 `PE_create_console` 之前静默死亡"的真因，而不是早期就挂了。
+> 待核实项：DarwinBoot 侧 `BootVideo.h` 当前实际写入顺序（下一步要么查源码、要么看红块探针）。
+> 方块标记已内置自动判据：**Video 布局对不上时右上角会出现红块**（见坑 10）。
+
+### 坑 10：`nabu_mark_init(args->Video)` 编译不过（已修）
+```
+error: passing 'Boot_Video' (aka 'struct Boot_Video') to parameter of
+       incompatible type 'const unsigned long long *'
+```
+✅ 改为按「`unsigned long` 字流」传：`nabu_mark_init((const unsigned long *)&args->Video);`
+标记实现同时支持两种解释（结构体顺序优先，自动回退旧数组顺序），
+并在 `depth&0xFF != 32` 或走了回退时**画红块**，把布局问题直接暴露在屏幕上。
 
 ### 坑 9：EL 不是问题，别再查
 - `ModuleEntryPoint.S` 的 `EL1_OR_EL2` 分支：起始 EL2 则留 EL2，起始 EL1 则留 EL1
@@ -236,9 +278,20 @@ cd /root/Mu-Silicium && python3 build_uefi.py -d nabu -r DEBUG
 | 1 | 注入块移到补丁循环 `done` 之后 | ✅ 完成 |
 | 2 | `assert` 改容错（并升级为缩进无关正则） | ✅ 完成 |
 | 3 | `bash -n` 校验 → commit/push UniXNU → 触发 CI | ✅ 完成（`18ca785`）|
+| 3.5 | 首轮 CI 修注入冲突 → 暴露编译错误 → 再修 | ✅ 完成（见下）|
 | 4 | 下载产物 → 查日志/符号 | ⬜ **从这里开始** |
 | 5 | 重打 cust payload → 刷 + 启 → 数方块 | ⬜ |
 | 6 | 若方块 0：改"写可写 RAM + DarwinBoot 回读" | ⬜ 条件触发 |
+
+### 第 3.5 步：首轮 CI 结果（记录在案）
+- run `39611266428` **failure**，但**不再是补丁冲突**——冲突已修好。
+  证据：`zzz-boot-progress.patch` 的 `apply --check` 全过程无 `patch failed`。
+- 新错误是编译期：
+  `arm_init.c:373: passing 'Boot_Video' to parameter of incompatible type 'const unsigned long long *'`
+  → 见**坑 10**：`args->Video` 是 `struct Boot_Video`，不是数组。
+- 同时由 `pexpert/arm/pe_init.c:419-429` 反查出**坑 8 的结论有误**（display 在第 2 位），
+  已在该节写更正与待核实项。
+- 修法：传 `(const unsigned long *)&args->Video`，实现对两种布局自适应，布局可疑时画红块。
 
 ### 第 4 步：确认注入真的进了二进制
 

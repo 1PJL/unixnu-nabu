@@ -40,7 +40,7 @@ if 'NABU_MARK(1)' not in s:
     a1='\tPE_init_platform(FALSE, args); /* Get platform expert set up */'
     assert a1 in s, 'mark1 anchor missing'
     s=s.replace(a1,
-        '\tnabu_mark_init(args->Video);\n'
+        '\tnabu_mark_init((const unsigned long *)&args->Video);\n'
         '\tNABU_MARK(1);\n'+a1, 1)
 
 if 'NABU_MARK(2)' not in s:
