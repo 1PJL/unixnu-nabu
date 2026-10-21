@@ -34,6 +34,32 @@ archives = [
   "build-arm-driver.py NativeAES",
 ]
 
+[payload.adt]
+tool = "scripts/make-nabu-adt.py"
+chip_id = "207"
+# TODO(measure): --dram-size must be the real observed DRAM size.
+# Xiaomi Pad 5 ships 6 GiB or 8 GiB; placeholder below is 6 GiB (0x180000000).
+# Confirm with: adb shell cat /proc/meminfo  (MemTotal)
+owned_memory_size = "0x130000000"
+dram_size = "0x180000000"
+cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
+packed_data_ramdisk = true
+ipad_identity = true
+unique_chip_id = "required"          # the platform seed is not stored in any repository
+
+[userdata]
+# TODO(measure): first_lba / last_lba must come from the real GPT.
+# Placeholder below is NOT measured -- do not trust it.
+# Confirm with: adb shell cat /proc/partitions  (or: edl printgpt)
+# Observed userdata size from fastboot: 0x74167BB000 bytes; UFS LBA is 4096 bytes.
+first_lba = 0x2f3840
+last_lba = 0x3d0abfa
+lba_bytes = 4096
+windows = [
+  { name = "OS", component = "OS" },
+  { name = "SystemOS", component = "Cryptex1,SystemOS" },
+]
+
 [kernel.prelink]
 tool = "kits/NativePrelink/emit_prelink.py"
 kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
