@@ -33,7 +33,10 @@ id = "xnu"
 title = "XNU (SM8150 UFS)"
 type = "xnu"
 path = "Payloads/kernel.macho"
-args = "-v serial=3 debug=0x14e"
+# -v/debug=0x14e turn on STARTUP_DEBUG_VERBOSE: kernel_startup_log() then calls
+# kprintf once startup_phase passes STARTUP_SUB_KPRINTF, and kprintf before the
+# console exists is what stopped the boot at checkpoint 50. Keep the args minimal.
+args = ""
 TOML
 
 rm -f "$OUT"
