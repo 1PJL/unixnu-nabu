@@ -1,0 +1,1449 @@
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -13,3 +13,5 @@
+ iokit/Kernel/arm/NabuEntitlements.cpp                           optional iokitcpp
+ iokit/Kernel/arm/NabuKeyStore.cpp                               optional iokitcpp
+ iokit/Kernel/arm/NabuWatchdog.cpp                               optional iokitcpp
++iokit/Kernel/arm/NabuSurface.cpp                                optional iokitcpp
++iokit/Kernel/arm/NabuFramebuffer.cpp                            optional iokitcpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -57,6 +57,16 @@
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = IOWatchdog;"
+     "   },"
++    "   {"
++    "     'IOClass'         = IOCoreSurfaceRoot;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = IOCoreSurfaceRoot;"
++    "   },"
++    "   {"
++    "     'IOClass'         = AppleCLCD;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'nabu,display';"
++    "   },"
+ #endif
+     "   {"
+     "     'IOClass'         = IOPanicPlatform;"
+--- a/iokit/Kernel/arm/NabuPlatformExpert.cpp
++++ b/iokit/Kernel/arm/NabuPlatformExpert.cpp
+@@ -62,6 +62,18 @@
+ 		cpus->release();
+ 	}
+ 	createNubs(this, IODTFindMatchingEntries(root, kIODTExclusive, excludeList()));
++
++	/*
++	 * No AppleARMIO driver publishes the /arm-io children: do it here so
++	 * built-in drivers (the display, AppleCLCD) can match them. The GIC is
++	 * driven by the platform code and gets no nub. The nubs hang off this
++	 * platform expert: IOPlatformDevice::compareName asks its provider.
++	 */
++	IORegistryEntry *armio = root->childFromPath("arm-io", gIODTPlane);
++	if (armio != NULL) {
++		createNubs(this, IODTFindMatchingEntries(armio, kIODTExclusive, "('gic')"));
++		armio->release();
++	}
+ }
+ 
+ bool
+--- /dev/null
++++ b/iokit/Kernel/arm/NabuSurface.h
+@@ -0,0 +1,65 @@
++/*
++ * Built-in IOSurface for NABU (see NabuSurface.cpp).
++ *
++ * Shared with NabuFramebuffer.cpp: the framebuffer looks surfaces up by
++ * id when a swap names them and publishes the panel memory itself as the
++ * default framebuffer surface.
++ */
++#ifndef _NABU_SURFACE_H
++#define _NABU_SURFACE_H
++
++#include <pexpert/arm64/board_config.h>
++
++#if defined(NABU)
++#include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <libkern/c++/OSObject.h>
++#include <mach/mach_types.h>
++
++#define NABU_SURFACE_MAX_PLANES        20
++
++struct nabu_surface_plane {
++	uint32_t width, height, bytesPerRow, offset, size;
++	uint16_t bytesPerElement;
++	uint8_t  elementWidth, elementHeight;
++};
++
++class NabuSurface : public OSObject {
++	OSDeclareDefaultStructors(NabuSurface);
++
++public:
++	uint32_t id;
++	uint32_t width, height, bytesPerRow, offset, pixelFormat, allocSize;
++	uint16_t bytesPerElement;
++	uint8_t  elementWidth, elementHeight;
++	uint32_t cacheMode, planeCount, parentID;
++	struct nabu_surface_plane planes[NABU_SURFACE_MAX_PLANES];
++
++	IOMemoryDescriptor       *memory;       /* pixels (buffer or physical) */
++	IOOptionBits              mapCache;     /* cache mode for user mappings */
++	IOBufferMemoryDescriptor *state;        /* shared state page, read-only for users */
++	IOMemoryMap              *kernelMap;    /* lazily created for kernel copies */
++
++	bool init() APPLE_KEXT_OVERRIDE { return OSObject::init(); }
++	void free() APPLE_KEXT_OVERRIDE;
++
++	/* Kernel address of the pixels (mapped on first use), or 0. */
++	uintptr_t kernelAddress();
++};
++
++/* Retained surface for an id, or NULL. */
++NabuSurface *nabu_surface_copy(uint32_t id);
++
++/*
++ * Publish physical memory (the panel framebuffer) as a surface. Returns a
++ * retained surface that stays in the id table until released by the caller
++ * and every user.
++ */
++NabuSurface *nabu_surface_create_physical(uint64_t phys, uint32_t width,
++    uint32_t height, uint32_t bytesPerRow, uint32_t pixelFormat);
++
++/* Send right for the surface in task (IOSurfaceLookupFromMachPort). */
++mach_port_name_t nabu_surface_port_in_task(NabuSurface *surface, task_t task);
++
++#endif /* NABU */
++#endif /* _NABU_SURFACE_H */
+--- /dev/null
++++ b/iokit/Kernel/arm/NabuSurface.cpp
+@@ -0,0 +1,872 @@
++/*
++ * Built-in IOSurface for NABU.
++ *
++ * Apple's IOSurface kext is closed. IOSurface.framework (iOS 16.7) finds
++ * IOServiceNameMatching("IOCoreSurfaceRoot"), opens it with type 0 and
++ * talks to the user client below:
++ *
++ *   sel 13  limits: struct out 0x18, u16 at +0x16 must be 1 (ABI version),
++ *           +0 offset alignment mask, +4 bytes-per-row alignment mask
++ *   sel 0   create: scalar [parent id], struct in = serialized property
++ *           dictionary (binary or XML), struct out = lock result (0xa68)
++ *   sel 4   lookup by id: scalar [id], struct out = lock result
++ *   sel 34  lookup by mach port: scalar [port name], struct out = lock result
++ *   sel 35  create mach port: scalars [id, options], scalar out [port name]
++ *   traps   0/1 use count +/- (id, category), 2 lock / 3 unlock
++ *           (id, options, &seed), 4/5 release (id)
++ *
++ * The lock result tells the library where the surface lives in the
++ * caller's address space: +0 pixels, +8 shared state page (registry id,
++ * seed at +0xc), +0x10 timestamps, then id, sizes and geometry (layout in
++ * nabu_surface_fill_result). Every surface is wired kernel memory mapped
++ * into each task that creates or looks it up; mappings are counted per
++ * client and dropped on release or close.
++ *
++ * Values, notifications, accelerators and shared events are accepted and
++ * ignored (logged once per selector).
++ */
++#include "NabuSurface.h"
++
++#if defined(NABU)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOLocks.h>
++#include <IOKit/system.h>
++#include <libkern/c++/OSArray.h>
++#include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSNumber.h>
++#include <libkern/c++/OSUnserialize.h>
++#include <sys/proc.h>
++
++enum {
++	kNabuSurfaceCreate             = 0,
++	kNabuSurfaceLookup             = 4,
++	kNabuSurfaceLimits             = 13,
++	kNabuSurfaceLookupFromPort     = 34,
++	kNabuSurfaceCreatePort         = 35,
++};
++
++enum {
++	kNabuSurfaceTrapIncrementUse   = 0,
++	kNabuSurfaceTrapDecrementUse   = 1,
++	kNabuSurfaceTrapLock           = 2,
++	kNabuSurfaceTrapUnlock         = 3,
++	kNabuSurfaceTrapRelease        = 4,
++	kNabuSurfaceTrapReleaseFailed  = 5,
++};
++
++#define NABU_SURFACE_RESULT_SIZE       0xa68
++#define NABU_SURFACE_MAX_ID            4096
++#define NABU_SURFACE_MAX_DIM           16384
++#define NABU_SURFACE_MAX_ALLOC         (256u << 20)
++#define NABU_SURFACE_MAX_PROPS         (64u << 10)
++#define NABU_SURFACE_ROW_ALIGN         64
++#define NABU_SURFACE_TIMESTAMPS        0x800   /* offset in the state page */
++#define NABU_SURFACE_STATE_SEED        0xc     /* u32 in the state page */
++#define kIOSurfaceLockReadOnly          0x1
++
++static IOLock       *nabu_surface_lock;
++static NabuSurface *nabu_surface_table[NABU_SURFACE_MAX_ID];
++static uint32_t      nabu_surface_users[NABU_SURFACE_MAX_ID];
++static uint32_t      nabu_surface_next_id = 1;
++static uint32_t      nabu_surface_creates_logged;
++static uint64_t      nabu_surface_wired;       /* bytes of buffer surfaces */
++#define NABU_SURFACE_WIRED_MAX         (1536ull << 20)
++
++OSDefineMetaClassAndStructors(NabuSurface, OSObject);
++
++void
++NabuSurface::free()
++{
++	if (OSDynamicCast(IOBufferMemoryDescriptor, memory) != NULL) {
++		OSAddAtomic64(-(SInt64)allocSize, (volatile SInt64 *)&nabu_surface_wired);
++	}
++	OSSafeReleaseNULL(kernelMap);
++	OSSafeReleaseNULL(memory);
++	OSSafeReleaseNULL(state);
++	OSObject::free();
++}
++
++uintptr_t
++NabuSurface::kernelAddress()
++{
++	IOBufferMemoryDescriptor *buffer = OSDynamicCast(IOBufferMemoryDescriptor, memory);
++	if (buffer != NULL) {
++		return (uintptr_t)buffer->getBytesNoCopy();
++	}
++	IOLockLock(nabu_surface_lock);
++	if (kernelMap == NULL && memory != NULL) {
++		kernelMap = memory->map(kIOMapWriteCombineCache);
++	}
++	IOLockUnlock(nabu_surface_lock);
++	return kernelMap != NULL ? (uintptr_t)kernelMap->getVirtualAddress() : 0;
++}
++
++static uint32_t *
++nabu_surface_seed(NabuSurface *s)
++{
++	return (uint32_t *)((uint8_t *)s->state->getBytesNoCopy() + NABU_SURFACE_STATE_SEED);
++}
++
++/*
++ * Give the surface an id and a table slot; the table holds one retain and a
++ * user count (creators, client mappings, kernel holders). Lock held.
++ */
++static bool
++nabu_surface_insert_locked(NabuSurface *s)
++{
++	for (uint32_t n = 0; n < NABU_SURFACE_MAX_ID - 1; n++) {
++		uint32_t id = nabu_surface_next_id;
++		nabu_surface_next_id = id + 1 < NABU_SURFACE_MAX_ID ? id + 1 : 1;
++		if (nabu_surface_table[id] == NULL) {
++			s->id = id;
++			s->retain();
++			nabu_surface_table[id] = s;
++			nabu_surface_users[id] = 1;
++			*(uint64_t *)s->state->getBytesNoCopy() = id;   /* registry id */
++			return true;
++		}
++	}
++	return false;
++}
++
++/* Add a user to a surface that may have left the table (port lookups). */
++static bool
++nabu_surface_get(NabuSurface *s)
++{
++	bool ok = true;
++	IOLockLock(nabu_surface_lock);
++	if (nabu_surface_table[s->id] == s) {
++		nabu_surface_users[s->id]++;
++	} else if (nabu_surface_table[s->id] == NULL) {
++		s->retain();
++		nabu_surface_table[s->id] = s;
++		nabu_surface_users[s->id] = 1;
++	} else {
++		ok = false;
++	}
++	IOLockUnlock(nabu_surface_lock);
++	return ok;
++}
++
++/* Drop a user; the last one removes the surface from the table. */
++static void
++nabu_surface_put(NabuSurface *s)
++{
++	bool drop = false;
++	IOLockLock(nabu_surface_lock);
++	if (nabu_surface_table[s->id] == s && --nabu_surface_users[s->id] == 0) {
++		nabu_surface_table[s->id] = NULL;
++		drop = true;
++	}
++	IOLockUnlock(nabu_surface_lock);
++	if (drop) {
++		s->release();
++	}
++}
++
++NabuSurface *
++nabu_surface_copy(uint32_t id)
++{
++	NabuSurface *s = NULL;
++	if (id == 0 || id >= NABU_SURFACE_MAX_ID || nabu_surface_lock == NULL) {
++		return NULL;
++	}
++	IOLockLock(nabu_surface_lock);
++	s = nabu_surface_table[id];
++	if (s != NULL) {
++		s->retain();
++	}
++	IOLockUnlock(nabu_surface_lock);
++	return s;
++}
++
++/* The table lock; the framebuffer may publish a surface before the root starts. */
++static void
++nabu_surface_init_lock(void)
++{
++	if (nabu_surface_lock == NULL) {
++		IOLock *lock = IOLockAlloc();
++		if (!OSCompareAndSwapPtr(NULL, lock, &nabu_surface_lock)) {
++			IOLockFree(lock);
++		}
++	}
++}
++
++static NabuSurface *
++nabu_surface_alloc(void)
++{
++	nabu_surface_init_lock();
++	NabuSurface *s = OSTypeAlloc(NabuSurface);
++	if (s == NULL || !s->init()) {
++		OSSafeReleaseNULL(s);
++		return NULL;
++	}
++	s->state = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++	    kIODirectionInOut | kIOMemoryKernelUserShared, page_size, page_size);
++	if (s->state == NULL) {
++		s->release();
++		return NULL;
++	}
++	bzero(s->state->getBytesNoCopy(), page_size);
++	return s;
++}
++
++static bool
++nabu_surface_publish(NabuSurface *s)
++{
++	bool ok;
++	IOLockLock(nabu_surface_lock);
++	ok = nabu_surface_insert_locked(s);
++	IOLockUnlock(nabu_surface_lock);
++	return ok;
++}
++
++NabuSurface *
++nabu_surface_create_physical(uint64_t phys, uint32_t width, uint32_t height,
++    uint32_t bytesPerRow, uint32_t pixelFormat)
++{
++	NabuSurface *s = nabu_surface_alloc();
++	if (s == NULL) {
++		return NULL;
++	}
++	s->width = width;
++	s->height = height;
++	s->bytesPerRow = bytesPerRow;
++	s->bytesPerElement = 4;
++	s->elementWidth = s->elementHeight = 1;
++	s->pixelFormat = pixelFormat;
++	s->allocSize = (uint32_t)round_page(bytesPerRow * height);
++	s->memory = IOMemoryDescriptor::withPhysicalAddress(phys, s->allocSize, kIODirectionInOut);
++	s->mapCache = kIOMapWriteCombineCache;
++	if (s->memory == NULL || !nabu_surface_publish(s)) {
++		s->release();
++		return NULL;
++	}
++	return s;
++}
++
++mach_port_name_t
++nabu_surface_port_in_task(NabuSurface *s, task_t task)
++{
++	mach_port_name_t name = 0;
++	IOUserClient::copyPortNameForObjectInTask(task, s, &name);
++	return name;
++}
++
++static uint32_t
++nabu_dict_u32(OSDictionary *dict, const char *key, uint32_t def)
++{
++	OSNumber *n = OSDynamicCast(OSNumber, dict->getObject(key));
++	return n != NULL ? n->unsigned32BitValue() : def;
++}
++
++static uint32_t
++nabu_div_up(uint32_t a, uint32_t b)
++{
++	return b > 1 ? (a + b - 1) / b : a;
++}
++
++static uint32_t
++nabu_row_bytes(uint32_t width, uint32_t ew, uint32_t bpe)
++{
++	uint64_t row = (uint64_t)nabu_div_up(width, ew) * bpe;
++	return (uint32_t)((row + NABU_SURFACE_ROW_ALIGN - 1) & ~(uint64_t)(NABU_SURFACE_ROW_ALIGN - 1));
++}
++
++/* Geometry from the creation properties (IOSurface.h keys). */
++static IOReturn
++nabu_surface_layout(NabuSurface *s, OSDictionary *props)
++{
++	uint64_t end;
++
++	s->width = nabu_dict_u32(props, "IOSurfaceWidth", 0);
++	s->height = nabu_dict_u32(props, "IOSurfaceHeight", 0);
++	s->bytesPerElement = (uint16_t)nabu_dict_u32(props, "IOSurfaceBytesPerElement", 4);
++	s->elementWidth = (uint8_t)nabu_dict_u32(props, "IOSurfaceElementWidth", 1);
++	s->elementHeight = (uint8_t)nabu_dict_u32(props, "IOSurfaceElementHeight", 1);
++	s->pixelFormat = nabu_dict_u32(props, "IOSurfacePixelFormat", 0);
++	s->cacheMode = nabu_dict_u32(props, "IOSurfaceCacheMode", 0);
++	s->offset = nabu_dict_u32(props, "IOSurfaceOffset", 0);
++	if (s->width > NABU_SURFACE_MAX_DIM || s->height > NABU_SURFACE_MAX_DIM ||
++	    s->bytesPerElement > 64 || s->elementWidth == 0 || s->elementHeight == 0) {
++		return kIOReturnBadArgument;
++	}
++	s->bytesPerRow = nabu_dict_u32(props, "IOSurfaceBytesPerRow",
++	    nabu_row_bytes(s->width, s->elementWidth, s->bytesPerElement));
++	if (s->bytesPerRow < (uint64_t)nabu_div_up(s->width, s->elementWidth) * s->bytesPerElement) {
++		return kIOReturnBadArgument;
++	}
++	end = (uint64_t)s->offset + (uint64_t)s->bytesPerRow * nabu_div_up(s->height, s->elementHeight);
++
++	OSArray *planes = OSDynamicCast(OSArray, props->getObject("IOSurfacePlaneInfo"));
++	s->planeCount = 0;
++	if (planes != NULL) {
++		uint64_t next = s->offset;
++		if (planes->getCount() > NABU_SURFACE_MAX_PLANES) {
++			return kIOReturnBadArgument;
++		}
++		for (unsigned int i = 0; i < planes->getCount(); i++) {
++			OSDictionary *pd = OSDynamicCast(OSDictionary, planes->getObject(i));
++			struct nabu_surface_plane *p = &s->planes[i];
++			if (pd == NULL) {
++				return kIOReturnBadArgument;
++			}
++			p->width = nabu_dict_u32(pd, "IOSurfacePlaneWidth", s->width);
++			p->height = nabu_dict_u32(pd, "IOSurfacePlaneHeight", s->height);
++			p->bytesPerElement = (uint16_t)nabu_dict_u32(pd, "IOSurfacePlaneBytesPerElement", 1);
++			p->elementWidth = (uint8_t)nabu_dict_u32(pd, "IOSurfacePlaneElementWidth", 1);
++			p->elementHeight = (uint8_t)nabu_dict_u32(pd, "IOSurfacePlaneElementHeight", 1);
++			if (p->width > NABU_SURFACE_MAX_DIM || p->height > NABU_SURFACE_MAX_DIM ||
++			    p->bytesPerElement > 64 || p->elementWidth == 0 || p->elementHeight == 0) {
++				return kIOReturnBadArgument;
++			}
++			p->bytesPerRow = nabu_dict_u32(pd, "IOSurfacePlaneBytesPerRow",
++			    nabu_row_bytes(p->width, p->elementWidth, p->bytesPerElement));
++			p->offset = nabu_dict_u32(pd, "IOSurfacePlaneOffset", (uint32_t)next);
++			p->size = nabu_dict_u32(pd, "IOSurfacePlaneSize",
++			    p->bytesPerRow * nabu_div_up(p->height, p->elementHeight));
++			next = round_page((uint64_t)p->offset + p->size);
++			if ((uint64_t)p->offset + p->size > end) {
++				end = (uint64_t)p->offset + p->size;
++			}
++		}
++		s->planeCount = planes->getCount();
++	}
++
++	uint64_t alloc = nabu_dict_u32(props, "IOSurfaceAllocSize", 0);
++	if (alloc < end) {
++		alloc = end;
++	}
++	alloc = round_page(alloc);
++	if (alloc == 0 || alloc > NABU_SURFACE_MAX_ALLOC) {
++		return kIOReturnNoMemory;
++	}
++	s->allocSize = (uint32_t)alloc;
++	return kIOReturnSuccess;
++}
++
++/* Per-client mapping of one surface. */
++class NabuSurfaceRef : public OSObject {
++	OSDeclareDefaultStructors(NabuSurfaceRef);
++
++public:
++	NabuSurface *surface;
++	IOMemoryMap  *data;
++	IOMemoryMap  *state;
++	uint32_t      count;
++
++	bool init() APPLE_KEXT_OVERRIDE { return OSObject::init(); }
++	void free() APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(NabuSurfaceRef, OSObject);
++
++void
++NabuSurfaceRef::free()
++{
++	OSSafeReleaseNULL(data);
++	OSSafeReleaseNULL(state);
++	if (surface != NULL) {
++		nabu_surface_put(surface);
++		surface->release();
++		surface = NULL;
++	}
++	OSObject::free();
++}
++
++class IOCoreSurfaceRoot : public IOService {
++	OSDeclareDefaultStructors(IOCoreSurfaceRoot);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(IOCoreSurfaceRoot, IOService);
++
++bool
++IOCoreSurfaceRoot::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	nabu_surface_init_lock();
++	setProperty(kIOUserClientClassKey, "IOSurfaceRootUserClient");
++	registerService();
++	IOLog("NABU SURF: IOCoreSurfaceRoot registered\n");
++	return true;
++}
++
++class IOSurfaceRootUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(IOSurfaceRootUserClient);
++
++	task_t   fTask;
++	IOLock  *fLock;
++	OSArray *fRefs;
++
++	NabuSurfaceRef *findRef(uint32_t id, unsigned int *index);
++	IOReturn addRef(NabuSurface *s, NabuSurfaceRef **refOut);
++	IOReturn returnSurface(NabuSurface *s, IOExternalMethodArguments *args);
++	IOReturn create(IOExternalMethodArguments *args);
++
++public:
++	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
++	void free() APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target,
++	    void *reference) APPLE_KEXT_OVERRIDE;
++	IOExternalTrap *getTargetAndTrapForIndex(IOService **targetP, UInt32 index) APPLE_KEXT_OVERRIDE;
++
++	IOReturn trapUseCount(void *id, void *category, void *, void *, void *, void *);
++	IOReturn trapLock(void *id, void *options, void *seedOut, void *, void *, void *);
++	IOReturn trapUnlock(void *id, void *options, void *seedOut, void *, void *, void *);
++	IOReturn trapRelease(void *id, void *, void *, void *, void *, void *);
++};
++
++OSDefineMetaClassAndStructors(IOSurfaceRootUserClient, IOUserClient);
++
++static uint64_t nabu_surf_logged;      /* selectors / traps already logged (< 64) */
++
++static void
++nabu_surf_log_once(const char *what, uint32_t n)
++{
++	uint32_t bit = (what[0] == 't' ? 48 : 0) + n;
++	if (bit >= 64 || (nabu_surf_logged & (1ULL << bit))) {
++		return;
++	}
++	nabu_surf_logged |= 1ULL << bit;
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	IOLog("NABU SURF: %s %s %u\n", name, what, n);
++}
++
++bool
++IOSurfaceRootUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
++{
++	if (!IOUserClient::initWithTask(owningTask, securityID, type)) {
++		return false;
++	}
++	fTask = owningTask;
++	fLock = IOLockAlloc();
++	fRefs = OSArray::withCapacity(16);
++	return fLock != NULL && fRefs != NULL;
++}
++
++void
++IOSurfaceRootUserClient::free()
++{
++	OSSafeReleaseNULL(fRefs);
++	if (fLock != NULL) {
++		IOLockFree(fLock);
++		fLock = NULL;
++	}
++	IOUserClient::free();
++}
++
++IOReturn
++IOSurfaceRootUserClient::clientClose(void)
++{
++	IOLockLock(fLock);
++	fRefs->flushCollection();
++	IOLockUnlock(fLock);
++	terminate();
++	return kIOReturnSuccess;
++}
++
++/* Lock held. */
++NabuSurfaceRef *
++IOSurfaceRootUserClient::findRef(uint32_t id, unsigned int *index)
++{
++	for (unsigned int i = 0; i < fRefs->getCount(); i++) {
++		NabuSurfaceRef *ref = (NabuSurfaceRef *)fRefs->getObject(i);
++		if (ref->surface->id == id) {
++			if (index != NULL) {
++				*index = i;
++			}
++			return ref;
++		}
++	}
++	return NULL;
++}
++
++/*
++ * Count one more create/lookup of s by this client, mapping it into the
++ * task the first time. Takes over the caller's user count on s.
++ */
++IOReturn
++IOSurfaceRootUserClient::addRef(NabuSurface *s, NabuSurfaceRef **refOut)
++{
++	IOLockLock(fLock);
++	NabuSurfaceRef *ref = findRef(s->id, NULL);
++	if (ref != NULL && ref->surface == s) {
++		ref->count++;
++		IOLockUnlock(fLock);
++		nabu_surface_put(s);
++		*refOut = ref;
++		return kIOReturnSuccess;
++	}
++	IOLockUnlock(fLock);
++
++	ref = OSTypeAlloc(NabuSurfaceRef);
++	if (ref == NULL || !ref->init()) {
++		OSSafeReleaseNULL(ref);
++		nabu_surface_put(s);
++		return kIOReturnNoMemory;
++	}
++	s->retain();
++	ref->surface = s;
++	ref->count = 1;
++	ref->data = s->memory->createMappingInTask(fTask, 0, kIOMapAnywhere | s->mapCache);
++	ref->state = s->state->createMappingInTask(fTask, 0, kIOMapAnywhere | kIOMapReadOnly);
++	if (ref->data == NULL || ref->state == NULL) {
++		ref->release();
++		return kIOReturnVMError;
++	}
++	IOLockLock(fLock);
++	NabuSurfaceRef *raced = findRef(s->id, NULL);
++	if (raced != NULL && raced->surface == s) {
++		/* Another thread mapped it meanwhile: count there, drop ours. */
++		raced->count++;
++		IOLockUnlock(fLock);
++		ref->release();
++		*refOut = raced;
++		return kIOReturnSuccess;
++	}
++	fRefs->setObject(ref);
++	IOLockUnlock(fLock);
++	ref->release();         /* fRefs holds it */
++	*refOut = ref;
++	return kIOReturnSuccess;
++}
++
++static void
++put32(uint8_t *p, uint32_t off, uint32_t v)
++{
++	memcpy(p + off, &v, 4);
++}
++
++static void
++put64(uint8_t *p, uint32_t off, uint64_t v)
++{
++	memcpy(p + off, &v, 8);
++}
++
++/* IOSurface.framework's lock result (copied to IOSurfaceClient + 0x68). */
++static void
++nabu_surface_fill_result(NabuSurface *s, NabuSurfaceRef *ref, uint8_t *out)
++{
++	bzero(out, NABU_SURFACE_RESULT_SIZE);
++	put64(out, 0x00, ref->data->getAddress());
++	put64(out, 0x08, ref->state->getAddress());
++	put64(out, 0x10, ref->state->getAddress() + NABU_SURFACE_TIMESTAMPS);
++	put32(out, 0x18, s->id);
++	put32(out, 0x1c, s->allocSize);
++	put32(out, 0x20, s->width);
++	put32(out, 0x24, s->height);
++	put32(out, 0x28, s->bytesPerRow);
++	put32(out, 0x2c, s->offset);
++	put32(out, 0x30, s->pixelFormat);
++	put32(out, 0x34, s->allocSize);
++	put32(out, 0x38, s->planeCount);
++	memcpy(out + 0x40, &s->bytesPerElement, 2);
++	out[0x42] = s->elementWidth;
++	out[0x43] = s->elementHeight;
++	put32(out, 0x44, s->cacheMode);
++	put32(out, 0x50, s->parentID);
++	put32(out, 0x54, 1);
++	for (uint32_t i = 0; i < s->planeCount; i++) {
++		uint8_t *p = out + 0x68 + i * 0x80;
++		const struct nabu_surface_plane *pl = &s->planes[i];
++		put32(p, 0x00, pl->width);
++		put32(p, 0x04, pl->height);
++		put32(p, 0x08, pl->bytesPerRow);
++		put32(p, 0x0c, pl->offset);
++		put32(p, 0x14, pl->size);
++		memcpy(p + 0x18, &pl->bytesPerElement, 2);
++		p[0x1a] = pl->elementWidth;
++		p[0x1b] = pl->elementHeight;
++	}
++}
++
++static IOReturn
++nabu_struct_out(IOExternalMethodArguments *args, const void *buf, uint32_t len)
++{
++	if (args->structureOutputDescriptor != NULL) {
++		if (len > args->structureOutputDescriptor->getLength()) {
++			return kIOReturnNoSpace;
++		}
++		args->structureOutputDescriptor->writeBytes(0, buf, len);
++		args->structureOutputDescriptorSize = len;
++		return kIOReturnSuccess;
++	}
++	if (args->structureOutput == NULL || len > args->structureOutputSize) {
++		return kIOReturnNoSpace;
++	}
++	memcpy(args->structureOutput, buf, len);
++	args->structureOutputSize = len;
++	return kIOReturnSuccess;
++}
++
++/* Map s for this client and answer with its lock result. Takes s's user count. */
++IOReturn
++IOSurfaceRootUserClient::returnSurface(NabuSurface *s, IOExternalMethodArguments *args)
++{
++	NabuSurfaceRef *ref = NULL;
++	IOReturn ret = addRef(s, &ref);
++	if (ret != kIOReturnSuccess) {
++		return ret;
++	}
++	uint8_t *out = (uint8_t *)IOMallocZeroData(NABU_SURFACE_RESULT_SIZE);
++	if (out == NULL) {
++		ret = kIOReturnNoMemory;
++	} else {
++		nabu_surface_fill_result(s, ref, out);
++		ret = nabu_struct_out(args, out, NABU_SURFACE_RESULT_SIZE);
++		IOFreeData(out, NABU_SURFACE_RESULT_SIZE);
++	}
++	if (ret != kIOReturnSuccess) {
++		/* The caller never learns the id: undo this create/lookup. */
++		trapRelease((void *)(uintptr_t)s->id, NULL, NULL, NULL, NULL, NULL);
++	}
++	return ret;
++}
++
++IOReturn
++IOSurfaceRootUserClient::create(IOExternalMethodArguments *args)
++{
++	const char *buf = (const char *)args->structureInput;
++	uint32_t len = args->structureInputSize;
++	char *copy = NULL;
++	IOReturn ret;
++
++	if (args->structureInputDescriptor != NULL) {
++		len = (uint32_t)args->structureInputDescriptor->getLength();
++		if (len == 0 || len > NABU_SURFACE_MAX_PROPS) {
++			return kIOReturnBadArgument;
++		}
++		copy = (char *)IOMallocData(len);
++		if (copy == NULL) {
++			return kIOReturnNoMemory;
++		}
++		args->structureInputDescriptor->readBytes(0, copy, len);
++		buf = copy;
++	}
++	OSObject *obj = (buf != NULL && len > 0) ? OSUnserializeXML(buf, len) : NULL;
++	if (copy != NULL) {
++		IOFreeData(copy, len);
++	}
++	OSDictionary *props = OSDynamicCast(OSDictionary, obj);
++	if (props == NULL) {
++		OSSafeReleaseNULL(obj);
++		IOLog("NABU SURF: create: bad property dictionary (%u bytes)\n", len);
++		return kIOReturnBadArgument;
++	}
++
++	NabuSurface *s = nabu_surface_alloc();
++	if (s == NULL) {
++		props->release();
++		return kIOReturnNoMemory;
++	}
++	s->parentID = args->scalarInputCount > 0 ? (uint32_t)args->scalarInput[0] : 0;
++	ret = nabu_surface_layout(s, props);
++	if (ret == kIOReturnSuccess) {
++		IOBufferMemoryDescriptor *mem = NULL;
++		if ((uint64_t)OSAddAtomic64(s->allocSize, (volatile SInt64 *)&nabu_surface_wired) +
++		    s->allocSize <= NABU_SURFACE_WIRED_MAX) {
++			mem = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++			    kIODirectionInOut | kIOMemoryKernelUserShared, s->allocSize, page_size);
++		}
++		if (mem == NULL) {
++			OSAddAtomic64(-(SInt64)s->allocSize, (volatile SInt64 *)&nabu_surface_wired);
++			ret = kIOReturnNoMemory;
++		} else {
++			bzero(mem->getBytesNoCopy(), s->allocSize);
++			s->memory = mem;
++			s->mapCache = kIOMapDefaultCache;
++			if (!nabu_surface_publish(s)) {
++				ret = kIOReturnNoResources;
++			}
++		}
++	}
++	if (ret != kIOReturnSuccess || nabu_surface_creates_logged < 64) {
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		nabu_surface_creates_logged++;
++		IOLog("NABU SURF: %s create id %u %ux%u fmt 0x%x bpe %u bpr %u planes %u size %u keys %u -> 0x%x\n",
++		    name, s->id, s->width, s->height, s->pixelFormat, s->bytesPerElement,
++		    s->bytesPerRow, s->planeCount, s->allocSize, props->getCount(), ret);
++	}
++	props->release();
++	if (ret != kIOReturnSuccess) {
++		s->release();
++		return ret;
++	}
++	ret = returnSurface(s, args);   /* takes the creator's user count */
++	s->release();
++	return ret;
++}
++
++IOReturn
++IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
++    __unused void *reference)
++{
++	uint64_t arg0 = args->scalarInputCount > 0 ? args->scalarInput[0] : 0;
++
++	switch (selector) {
++	case kNabuSurfaceLimits: {
++		uint8_t limits[0x18] = { 0 };
++		put32(limits, 0x0, NABU_SURFACE_ROW_ALIGN - 1);
++		put32(limits, 0x4, NABU_SURFACE_ROW_ALIGN - 1);
++		limits[0x16] = 1;
++		nabu_surf_log_once("sel", selector);
++		return nabu_struct_out(args, limits, sizeof(limits));
++	}
++	case kNabuSurfaceCreate:
++		return create(args);
++	case kNabuSurfaceLookup: {
++		NabuSurface *s = nabu_surface_copy((uint32_t)arg0);
++		IOReturn ret = kIOReturnNotFound;
++		if (s != NULL) {
++			ret = nabu_surface_get(s) ? returnSurface(s, args) : kIOReturnNotFound;
++			s->release();
++		}
++		nabu_surf_log_once("sel", selector);
++		return ret;
++	}
++	case kNabuSurfaceLookupFromPort: {
++		OSObject *obj = NULL;
++		IOReturn ret = IOUserClient::copyObjectForPortNameInTask(fTask, (mach_port_name_t)arg0, &obj);
++		NabuSurface *s = OSDynamicCast(NabuSurface, obj);
++		if (ret == kIOReturnSuccess) {
++			ret = (s != NULL && nabu_surface_get(s)) ? returnSurface(s, args) : kIOReturnBadArgument;
++		}
++		OSSafeReleaseNULL(obj);
++		nabu_surf_log_once("sel", selector);
++		return ret;
++	}
++	case kNabuSurfaceCreatePort: {
++		NabuSurface *s = nabu_surface_copy((uint32_t)arg0);
++		if (s == NULL || args->scalarOutputCount < 1) {
++			OSSafeReleaseNULL(s);
++			return kIOReturnNotFound;
++		}
++		args->scalarOutput[0] = nabu_surface_port_in_task(s, fTask);
++		args->scalarOutputCount = 1;
++		s->release();
++		nabu_surf_log_once("sel", selector);
++		return kIOReturnSuccess;
++	}
++	default:
++		/* Values, notifications, ownership, timestamps...: accept and ignore. */
++		for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
++			args->scalarOutput[i] = 0;
++		}
++		if (args->structureOutput != NULL) {
++			bzero(args->structureOutput, args->structureOutputSize);
++		}
++		nabu_surf_log_once("sel", selector);
++		return kIOReturnSuccess;
++	}
++}
++
++IOReturn
++IOSurfaceRootUserClient::trapUseCount(__unused void *id, __unused void *category,
++    void *, void *, void *, void *)
++{
++	return kIOReturnSuccess;
++}
++
++static IOReturn
++nabu_surface_seed_out(NabuSurface *s, void *seedOut, bool bump)
++{
++	uint32_t seed = bump ? OSIncrementAtomic((volatile SInt32 *)nabu_surface_seed(s)) + 1 :
++	    *nabu_surface_seed(s);
++	if (seedOut != NULL && copyout(&seed, (user_addr_t)seedOut, sizeof(seed)) != 0) {
++		return kIOReturnBadArgument;
++	}
++	return kIOReturnSuccess;
++}
++
++/* Retained surface this client created or looked up, or NULL. */
++static NabuSurface *
++nabu_surface_held(IOLock *lock, OSArray *refs, uint32_t id)
++{
++	NabuSurface *s = NULL;
++	IOLockLock(lock);
++	for (unsigned int i = 0; i < refs->getCount(); i++) {
++		NabuSurfaceRef *ref = (NabuSurfaceRef *)refs->getObject(i);
++		if (ref->surface->id == id) {
++			s = ref->surface;
++			s->retain();
++			break;
++		}
++	}
++	IOLockUnlock(lock);
++	return s;
++}
++
++IOReturn
++IOSurfaceRootUserClient::trapLock(void *id, __unused void *options, void *seedOut,
++    void *, void *, void *)
++{
++	NabuSurface *s = nabu_surface_held(fLock, fRefs, (uint32_t)(uintptr_t)id);
++	if (s == NULL) {
++		return kIOReturnNotFound;
++	}
++	IOReturn ret = nabu_surface_seed_out(s, seedOut, false);
++	s->release();
++	return ret;
++}
++
++IOReturn
++IOSurfaceRootUserClient::trapUnlock(void *id, void *options, void *seedOut,
++    void *, void *, void *)
++{
++	NabuSurface *s = nabu_surface_held(fLock, fRefs, (uint32_t)(uintptr_t)id);
++	if (s == NULL) {
++		return kIOReturnNotFound;
++	}
++	IOReturn ret = nabu_surface_seed_out(s, seedOut,
++	    !((uintptr_t)options & kIOSurfaceLockReadOnly));
++	s->release();
++	return ret;
++}
++
++IOReturn
++IOSurfaceRootUserClient::trapRelease(void *id, void *, void *, void *, void *, void *)
++{
++	unsigned int index;
++	IOLockLock(fLock);
++	NabuSurfaceRef *ref = findRef((uint32_t)(uintptr_t)id, &index);
++	if (ref != NULL && --ref->count == 0) {
++		fRefs->removeObject(index);     /* unmaps and drops the user count */
++	}
++	IOLockUnlock(fLock);
++	return ref != NULL ? kIOReturnSuccess : kIOReturnNotFound;
++}
++
++static IOExternalTrap nabu_surface_traps[] = {
++	[kNabuSurfaceTrapIncrementUse]  = { NULL, (IOTrap) & IOSurfaceRootUserClient::trapUseCount },
++	[kNabuSurfaceTrapDecrementUse]  = { NULL, (IOTrap) & IOSurfaceRootUserClient::trapUseCount },
++	[kNabuSurfaceTrapLock]          = { NULL, (IOTrap) & IOSurfaceRootUserClient::trapLock },
++	[kNabuSurfaceTrapUnlock]        = { NULL, (IOTrap) & IOSurfaceRootUserClient::trapUnlock },
++	[kNabuSurfaceTrapRelease]       = { NULL, (IOTrap) & IOSurfaceRootUserClient::trapRelease },
++	[kNabuSurfaceTrapReleaseFailed] = { NULL, (IOTrap) & IOSurfaceRootUserClient::trapRelease },
++};
++
++IOExternalTrap *
++IOSurfaceRootUserClient::getTargetAndTrapForIndex(IOService **targetP, UInt32 index)
++{
++	if (index >= sizeof(nabu_surface_traps) / sizeof(nabu_surface_traps[0])) {
++		nabu_surf_log_once("trap", index);
++		return NULL;
++	}
++	nabu_surf_log_once("trap", index);
++	*targetP = this;
++	return &nabu_surface_traps[index];
++}
++#endif /* NABU */
+--- /dev/null
++++ b/iokit/Kernel/arm/NabuFramebuffer.cpp
+@@ -0,0 +1,455 @@
++/*
++ * Built-in IOMobileFramebuffer for NABU: the ABL's continuous-splash
++ * framebuffer (1080x2400 a8r8g8b8 in RAM, the panel scans it out by
++ * itself) as the main display, driven by CoreAnimation's CPU renderer.
++ *
++ * IOMobileFramebuffer.framework (iOS 16.7) counts /arm-io children with
++ * device_type "display-subsystem", waits for that many services matching
++ * IOServiceMatching("IOMobileFramebuffer"), opens each with type 0 and
++ * reads canvas-width/canvas-height from the service's provider. The class
++ * here (AppleCLCD, an IOMobileFramebuffer) matches the /arm-io/disp0 nub.
++ *
++ * User client selectors used by CoreAnimation:
++ *   3  GetLayerDefaultSurface [layer, ?] -> [IOSurface port name]
++ *   4  SwapBegin -> [swap id]
++ *   5  SwapEnd, struct 0x46c: +0x50 swap id, +0x54 IOSurface id per layer
++ *      (4 layers), +0x64 rect a / +0xc4 rect b per layer (int x,y,w,h),
++ *      +0x104 enabled layer mask
++ *   6  SwapWait, 7 GetID, 8 GetDisplaySize -> [w, h], 18 IsMainDisplay,
++ *   28 GetDotPitch, 72 Enable/DisableNotifications [func, refcon, type, 0]
++ * Everything else is accepted and logged once.
++ *
++ * SwapEnd copies the enabled layers' surfaces into the panel memory (no
++ * scaling, CPU copy). Vsync (notification type 5) is a 60 Hz timer that
++ * sends (count, mach_absolute_time, 0) as 32-bit halves to clients that
++ * enabled it, through the port they registered (IOConnectSetNotificationPort).
++ *
++ * The panel memory itself is published as an IOSurface and returned as the
++ * default framebuffer surface. The kernel text console keeps drawing over
++ * the GUI by default: pausing it (boot-arg nabufb_noconsole=1, on the
++ * first swap) switches the console to serial, which also hides panics.
++ */
++#include "NabuSurface.h"
++
++#if defined(NABU)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOLocks.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/system.h>
++#include <pexpert/pexpert.h>
++#include <kern/clock.h>
++#include <sys/proc.h>
++
++enum {
++	kNabuFBGetLayerDefaultSurface  = 3,
++	kNabuFBSwapBegin               = 4,
++	kNabuFBSwapEnd                 = 5,
++	kNabuFBSwapWait                = 6,
++	kNabuFBGetID                   = 7,
++	kNabuFBGetDisplaySize          = 8,
++	kNabuFBIsMainDisplay           = 18,
++	kNabuFBGetDotPitch             = 28,
++	kNabuFBNotifications           = 72,
++};
++
++#define NABU_FB_SWAP_REC_SIZE          0x46c
++#define NABU_FB_LAYERS                 4
++#define NABU_FB_NOTIFY_TYPES           8
++#define NABU_FB_NOTIFY_VSYNC           5
++#define NABU_FB_VSYNC_US               16667
++#define NABU_FB_DOT_PITCH              395     /* ppi, 6.67" 1080x2400 */
++#define NABU_FB_FORMAT_BGRA            0x42475241
++
++class IOMobileFramebuffer : public IOService {
++	OSDeclareDefaultStructors(IOMobileFramebuffer);
++};
++
++OSDefineMetaClassAndStructors(IOMobileFramebuffer, IOService);
++
++class IOMobileFramebufferUserClient;
++
++class AppleCLCD : public IOMobileFramebuffer {
++	OSDeclareDefaultStructors(AppleCLCD);
++
++	IOWorkLoop         *fWorkLoop;
++	IOTimerEventSource *fVsync;
++	uint64_t            fVsyncCount;
++
++	static void vsyncFired(OSObject *owner, IOTimerEventSource *sender);
++
++public:
++	uint64_t      fPhys;
++	uint32_t      fWidth, fHeight, fRowBytes;
++	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
++	IOMemoryMap  *fMap;
++	NabuSurface *fSurface;         /* the panel memory as an IOSurface */
++	IOLock       *fLock;            /* swaps and client list */
++	OSArray      *fClients;
++	uint32_t      fSwapID;
++	bool          fConsolePaused;
++
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	void addClient(IOMobileFramebufferUserClient *client);
++	void removeClient(IOMobileFramebufferUserClient *client);
++	void swap(const uint8_t *rec);
++};
++
++OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
++
++class IOMobileFramebufferUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(IOMobileFramebufferUserClient);
++
++public:
++	AppleCLCD          *fFB;
++	task_t              fTask;
++	mach_port_t         fPort;
++	io_user_reference_t fFunc[NABU_FB_NOTIFY_TYPES];
++	io_user_reference_t fRefcon[NABU_FB_NOTIFY_TYPES];
++
++	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn registerNotificationPort(mach_port_t port, UInt32 type,
++	    io_user_reference_t refCon) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target,
++	    void *reference) APPLE_KEXT_OVERRIDE;
++	void notify(uint32_t type, const uint64_t *values, uint32_t count);
++};
++
++OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
++
++bool
++AppleCLCD::start(IOService *provider)
++{
++	PE_Video video;
++
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	PE_current_console(&video);
++	fPhys = video.v_baseAddr;
++	fWidth = (uint32_t)video.v_width;
++	fHeight = (uint32_t)video.v_height;
++	fRowBytes = (uint32_t)video.v_rowBytes;
++	if (fPhys == 0 || fWidth == 0 || fHeight == 0 || fRowBytes < fWidth * 4) {
++		IOLog("NABU FB: no boot framebuffer\n");
++		return false;
++	}
++	fLock = IOLockAlloc();
++	fClients = OSArray::withCapacity(4);
++	fSurface = nabu_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, NABU_FB_FORMAT_BGRA);
++	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
++	fWorkLoop = IOWorkLoop::workLoop();
++	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
++		IOLog("NABU FB: setup failed\n");
++		OSSafeReleaseNULL(fSurface);    /* stays published: also held by the table */
++		OSSafeReleaseNULL(fWorkLoop);
++		return false;
++	}
++	fVsync = IOTimerEventSource::timerEventSource(this, &AppleCLCD::vsyncFired);
++	if (fVsync == NULL || fWorkLoop->addEventSource(fVsync) != kIOReturnSuccess) {
++		IOLog("NABU FB: no vsync timer\n");
++		return false;
++	}
++	fVsync->setTimeoutUS(NABU_FB_VSYNC_US);
++
++	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
++	setProperty("external", false);
++	setProperty("DisplayPipePlaneBaseAlignment", 64ULL, 32);
++	registerService();
++	IOLog("NABU FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u\n",
++	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id);
++	return true;
++}
++
++void
++AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
++{
++	AppleCLCD *fb = (AppleCLCD *)owner;
++	uint64_t now = mach_absolute_time();
++	uint64_t count = ++fb->fVsyncCount;
++	uint64_t values[6] = {
++		(uint32_t)count, (uint32_t)(count >> 32),
++		(uint32_t)now, (uint32_t)(now >> 32),
++		0, 0,
++	};
++
++	IOLockLock(fb->fLock);
++	for (unsigned int i = 0; i < fb->fClients->getCount(); i++) {
++		IOMobileFramebufferUserClient *client =
++		    (IOMobileFramebufferUserClient *)fb->fClients->getObject(i);
++		client->notify(NABU_FB_NOTIFY_VSYNC, values, 6);
++	}
++	IOLockUnlock(fb->fLock);
++	sender->setTimeoutUS(NABU_FB_VSYNC_US);
++}
++
++void
++AppleCLCD::addClient(IOMobileFramebufferUserClient *client)
++{
++	IOLockLock(fLock);
++	fClients->setObject(client);
++	IOLockUnlock(fLock);
++}
++
++void
++AppleCLCD::removeClient(IOMobileFramebufferUserClient *client)
++{
++	IOLockLock(fLock);
++	unsigned int i = fClients->getNextIndexOfObject(client, 0);
++	if (i != (unsigned int)-1) {
++		fClients->removeObject(i);
++	}
++	IOLockUnlock(fLock);
++}
++
++static uint32_t
++get32(const uint8_t *p, uint32_t off)
++{
++	uint32_t v;
++	memcpy(&v, p + off, 4);
++	return v;
++}
++
++static uint32_t nabu_fb_swaps_logged;
++
++/* Copy each enabled layer's surface into the panel memory (no scaling). */
++void
++AppleCLCD::swap(const uint8_t *rec)
++{
++	uint32_t mask = get32(rec, 0x104);
++
++	if (!fConsolePaused) {
++		int quiet = 0;
++		fConsolePaused = true;
++		if (PE_parse_boot_argn("nabufb_noconsole", &quiet, sizeof(quiet)) && quiet != 0) {
++			PE_Video video;
++			PE_current_console(&video);
++			PE_initialize_console(&video, kPEDisableScreen);
++		}
++	}
++
++	for (uint32_t layer = 0; layer < NABU_FB_LAYERS; layer++) {
++		uint32_t id = get32(rec, 0x54 + 4 * layer);
++		const uint8_t *a = rec + 0x64 + 16 * layer;
++		const uint8_t *b = rec + 0xc4 + 16 * layer;
++		int32_t sx = (int32_t)get32(a, 0), sy = (int32_t)get32(a, 4);
++		int32_t dx = (int32_t)get32(b, 0), dy = (int32_t)get32(b, 4);
++		int32_t w = (int32_t)get32(b, 8), h = (int32_t)get32(b, 12);
++
++		if (!(mask & (1u << layer)) || id == 0) {
++			continue;
++		}
++		NabuSurface *s = nabu_surface_copy(id);
++		if (nabu_fb_swaps_logged < 16) {
++			nabu_fb_swaps_logged++;
++			IOLog("NABU FB: swap %u layer %u surface %u %ux%u fmt 0x%x bpr %u a %d,%d %ux%u b %d,%d %dx%d\n",
++			    get32(rec, 0x50), layer, id, s ? s->width : 0, s ? s->height : 0,
++			    s ? s->pixelFormat : 0, s ? s->bytesPerRow : 0, sx, sy, get32(a, 8),
++			    get32(a, 12), dx, dy, w, h);
++		}
++		if (s == NULL || s == fSurface) {
++			OSSafeReleaseNULL(s);
++			continue;
++		}
++		uintptr_t src = s->kernelAddress();
++		uint32_t bpe = s->bytesPerElement ? s->bytesPerElement : 4;
++		if (w <= 0 || h <= 0) {
++			w = (int32_t)s->width;
++			h = (int32_t)s->height;
++		}
++		if (sx < 0 || sy < 0) {
++			sx = sy = 0;
++		}
++		if (dx < 0 || dy < 0) {
++			dx = dy = 0;
++		}
++		if (w > (int32_t)s->width - sx) {
++			w = (int32_t)s->width - sx;
++		}
++		if (h > (int32_t)s->height - sy) {
++			h = (int32_t)s->height - sy;
++		}
++		if (w > (int32_t)fWidth - dx) {
++			w = (int32_t)fWidth - dx;
++		}
++		if (h > (int32_t)fHeight - dy) {
++			h = (int32_t)fHeight - dy;
++		}
++		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
++		    (uint64_t)(sx + w) * 4;
++		if (w <= 0 || h <= 0 || s->elementWidth != 1 || s->elementHeight != 1 ||
++		    s->memory == NULL || last > s->memory->getLength()) {
++			src = 0;
++		}
++		if (src != 0 && bpe == 4) {
++			for (int32_t y = 0; y < h; y++) {
++				memcpy((void *)(fPixels + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
++				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
++				    (size_t)w * 4);
++			}
++		}
++		s->release();
++	}
++}
++
++bool
++IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
++{
++	if (!IOUserClient::initWithTask(owningTask, securityID, type)) {
++		return false;
++	}
++	fTask = owningTask;
++	return true;
++}
++
++bool
++IOMobileFramebufferUserClient::start(IOService *provider)
++{
++	fFB = OSDynamicCast(AppleCLCD, provider);
++	if (fFB == NULL || !IOUserClient::start(provider)) {
++		return false;
++	}
++	fFB->addClient(this);
++	return true;
++}
++
++IOReturn
++IOMobileFramebufferUserClient::clientClose(void)
++{
++	if (fFB != NULL) {
++		fFB->removeClient(this);
++		IOLockLock(fFB->fLock);
++		mach_port_t old = fPort;
++		fPort = MACH_PORT_NULL;
++		IOLockUnlock(fFB->fLock);
++		if (old != MACH_PORT_NULL) {
++			releaseNotificationPort(old);
++		}
++	}
++	terminate();
++	return kIOReturnSuccess;
++}
++
++IOReturn
++IOMobileFramebufferUserClient::registerNotificationPort(mach_port_t port, __unused UInt32 type,
++    __unused io_user_reference_t refCon)
++{
++	mach_port_t old;
++	IOLockLock(fFB->fLock);
++	old = fPort;
++	fPort = port;
++	IOLockUnlock(fFB->fLock);
++	if (old != MACH_PORT_NULL) {
++		releaseNotificationPort(old);
++	}
++	return kIOReturnSuccess;
++}
++
++/* Called with the framebuffer lock held. */
++void
++IOMobileFramebufferUserClient::notify(uint32_t type, const uint64_t *values, uint32_t count)
++{
++	OSAsyncReference64 ref;
++
++	if (type >= NABU_FB_NOTIFY_TYPES || fFunc[type] == 0 || fPort == MACH_PORT_NULL) {
++		return;
++	}
++	bzero(ref, sizeof(ref));
++	setAsyncReference64(ref, fPort, (mach_vm_address_t)fFunc[type], fRefcon[type], fTask);
++	sendAsyncResult64WithOptions(ref, kIOReturnSuccess, (io_user_reference_t *)values, count,
++	    kIOUserNotifyOptionCanDrop);
++}
++
++static uint64_t nabu_fb_logged;        /* selectors already logged (< 64) */
++
++IOReturn
++IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
++    __unused void *reference)
++{
++	IOReturn ret = kIOReturnSuccess;
++	uint64_t out[2] = { 0, 0 };
++	uint32_t outCount = 0;
++
++	switch (selector) {
++	case kNabuFBGetLayerDefaultSurface:
++		out[0] = nabu_surface_port_in_task(fFB->fSurface, fTask);
++		outCount = 1;
++		break;
++	case kNabuFBSwapBegin:
++		IOLockLock(fFB->fLock);
++		out[0] = ++fFB->fSwapID;
++		IOLockUnlock(fFB->fLock);
++		outCount = 1;
++		break;
++	case kNabuFBSwapEnd: {
++		uint8_t rec[NABU_FB_SWAP_REC_SIZE];
++		if (args->structureInputDescriptor != NULL ||
++		    args->structureInputSize < NABU_FB_SWAP_REC_SIZE) {
++			ret = kIOReturnBadArgument;
++			break;
++		}
++		memcpy(rec, args->structureInput, sizeof(rec));
++		fFB->swap(rec);
++		break;
++	}
++	case kNabuFBGetID:
++		out[0] = 0;
++		outCount = 1;
++		break;
++	case kNabuFBGetDisplaySize:
++		out[0] = fFB->fWidth;
++		out[1] = fFB->fHeight;
++		outCount = 2;
++		break;
++	case kNabuFBIsMainDisplay:
++		out[0] = 1;
++		outCount = 1;
++		break;
++	case kNabuFBGetDotPitch:
++		out[0] = NABU_FB_DOT_PITCH;
++		outCount = 1;
++		break;
++	case kNabuFBNotifications:
++		if (args->scalarInputCount >= 3 && args->scalarInput[2] < NABU_FB_NOTIFY_TYPES) {
++			uint32_t type = (uint32_t)args->scalarInput[2];
++			IOLockLock(fFB->fLock);
++			fFunc[type] = args->scalarInput[0];
++			fRefcon[type] = args->scalarInput[1];
++			IOLockUnlock(fFB->fLock);
++			char name[32];
++			proc_selfname(name, sizeof(name));
++			IOLog("NABU FB: %s notifications type %u %s\n", name, type,
++			    args->scalarInput[0] ? "on" : "off");
++		}
++		break;
++	case kNabuFBSwapWait:
++	default:
++		break;
++	}
++
++	for (uint32_t i = 0; i < args->scalarOutputCount; i++) {
++		args->scalarOutput[i] = i < outCount ? out[i] : 0;
++	}
++	if (args->structureOutputDescriptor == NULL && args->structureOutput != NULL) {
++		bzero(args->structureOutput, args->structureOutputSize);
++	}
++	if (selector >= 64 || !(nabu_fb_logged & (1ULL << selector))) {
++		if (selector < 64) {
++			nabu_fb_logged |= 1ULL << selector;
++		}
++		char name[32];
++		proc_selfname(name, sizeof(name));
++		IOLog("NABU FB: %s sel %u in %u/%u out %u/%u -> 0x%x\n", name, selector,
++		    args->scalarInputCount, args->structureInputSize,
++		    args->scalarOutputCount, args->structureOutputSize, ret);
++	}
++	return ret;
++}
++#endif /* NABU */

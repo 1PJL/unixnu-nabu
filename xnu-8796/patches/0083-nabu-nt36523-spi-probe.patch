@@ -1,0 +1,2202 @@
+diff --git a/bsd/dev/nabu_touch.c b/bsd/dev/nabu_touch.c
+--- a/bsd/dev/nabu_touch.c
++++ b/bsd/dev/nabu_touch.c
+@@ -1,11 +1,19 @@
+ /*
+- * NABU SE7 FIFO I2C / GT9896 Yellowstone / Focaltech 54:52 bring-up.
+- * Call once after the scheduler is running; all work runs on one thread.
+- * Requires ABL-loaded GENI I2C firmware; votes L11C through nabu_rpmh.c.
+- * No firmware/config upload or direct PMIC writes. Only IC data write:
+- * zero to GT9896's event status after reading a report. See touch2/report.md.
++ * NABU NT36523 SPI bring-up.
++ *
++ * Board facts from the live nabu DTB:
++ *   SPI SE18  0x00c84000 (size 0x4000), QUPv3_2 wrapper 0x00cc0000
++ *   clocks    GCC QUPV3_WRAP2_S1 + WRAP2 M/S AHB, RCG 0x1e278
++ *   pins      GPIO23/24/25 (qup18), GPIO26 CS (qup18), GPIO39 IRQ
++ *   touch     novatek,NVT-ts-spi, swrst 0x3f0fe, max 15 MHz
++ *
++ * The first stage only proves the bus and reads the trim/FWINFO blocks.
++ * Point frames are logged; HID delivery is added once the hardware answers.
++ *
++ * SPDX-License-Identifier: BSD-2-Clause-Patent
+  */
+ #if defined(ARM64_BOARD_CONFIG_NABU)
++
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/errno.h>
+@@ -15,74 +23,59 @@
+ #include <machine/machine_routines.h>
+ #include <pexpert/pexpert.h>
+ 
++#include "nabu_geni_spi.h"
++#include "nabu_nt36523.h"
++
+ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
+-/* Mach MIG declaration is not included by BSD's exported thread.h. */
+ extern kern_return_t thread_terminate(thread_t);
+ extern int nabu_rpmh_vreg_enable(const char *res, unsigned mv);
+ extern void nabu_hid_touch(int finger, int down, int x, int y);
+ void nabu_touch_init(void);
+ 
+-#define TOUCH_SE_PA      0x00a84000u
+-#define TOUCH_GCC_PA     0x00100000u
+-#define TOUCH_NORTH_PA   0x03900000u /* DT TLMM + NORTH (0x500000) */
+-#define TOUCH_GCC_VOTE   0x5200cu
+-#define TOUCH_RCG       0x18148u    /* wrapper1 LOCAL S1 = global SE7 */
+-#define TOUCH_GPIO_CFG(n) ((uint32_t)(n) * 0x1000u)
+-#define TOUCH_GPIO_IO(n)  (TOUCH_GPIO_CFG(n) + 4u)
+-#define TOUCH_MAX        10u
+-#define TOUCH_GOODIX     1
+-#define TOUCH_FTS        2
+-/* GT9896 is Yellowstone in Xiaomi nabu-r-oss, not the Berlin protocol. */
+-#define GOODIX_PID_REG   0x4022u
+-#define GOODIX_EVENT_REG 0x4180u
+-#define GOODIX_HEAD_LEN  8u
+-#define GOODIX_POINT_LEN 8u
+-
+-#define SE_STATUS       0x040u
+-#define SE_MCLK         0x048u
+-#define SE_FW           0x068u
+-#define SE_CLK_SEL      0x07cu
+-#define SE_DMA          0x258u
+-#define SE_TX_LEN       0x26cu
+-#define SE_RX_LEN       0x270u
+-#define SE_SCL          0x278u
+-#define SE_CMD          0x600u
+-#define SE_CTRL         0x604u
+-#define SE_IRQ          0x610u
+-#define SE_IRQ_EN       0x614u
+-#define SE_IRQ_CLR      0x618u
+-#define SE_TX           0x700u
+-#define SE_RX           0x780u
+-#define SE_TX_COUNT     0x800u
+-#define SE_RX_COUNT     0x804u
+-#define SE_HW_TX        0xe24u
+-#define SE_HW_RX        0xe28u
+-#define SE_TX_WM        0x80cu
+-#define SE_RX_WM_IRQ    (1u << 26)
+-#define SE_RX_LAST      (1u << 27)
+-#define SE_TX_WM_IRQ    (1u << 30)
+-#define SE_DONE         (1u << 0)
+-#define SE_NACK         (1u << 10)
+-#define SE_ERRORS       (0x3eu | (1u << 9) | (1u << 10) | (1u << 12) | \
+-                         (1u << 13) | (3u << 24) | (3u << 28))
+-#define SE_EVENTS       (SE_DONE | SE_ERRORS | SE_RX_WM_IRQ | SE_RX_LAST | SE_TX_WM_IRQ)
+-/* geni_se_config_packing(8, 4, true, true, true): start bits 7/15/23/31,
+- * MSB-to-LSB, length 8, STOP only on vector 3. FIFO bytes remain LSB first. */
+-#define SE_PACK0        0x0007f8feu
+-#define SE_PACK1        0x000ffefeu
+-
+-static struct {
+-	vm_offset_t se, gcc, gpio;
+-	bool started, dead, probing;
+-	int kind, irq_hint;
+-	uint32_t irq_status, irq_last, active;
+-	unsigned sent, got;
+-	int x[TOUCH_MAX], y[TOUCH_MAX];
+-} st;
++#define NABU_GCC_PA        0x00100000u
++#define NABU_TLMM_PA       0x03000000u
++#define NABU_TLMM_SIZE     0x00060000u  /* through GPIO90 at 0x5a000 */
++#define NABU_SE_PA         0x00c84000u
++#define NABU_QUP_PA        0x00cc0000u
++
++#define NABU_GCC_VOTE      0x00052014u
++#define NABU_GCC_RCG       0x0001e278u
++#define NABU_GCC_M_AHB     0x0001e004u
++#define NABU_GCC_S_AHB     0x0001e008u
++#define NABU_GCC_SE_HALT   0x0001e274u
++
++#define NABU_TLMM_GPIO(n)  ((uint32_t)(n) * 0x1000u)
++#define NABU_TLMM_IO(n)    (NABU_TLMM_GPIO(n) + 4u)
++
++#define NABU_SE_IRQ_STATUS 0x610u
++#define NABU_SE_STATUS     0x40u
++#define NABU_SE_TX_COUNT   0x800u
++#define NABU_SE_RX_COUNT   0x804u
++
++/* Hardware mux indices for SM8150 pin groups:
++ * gpio23/24/25/26 = {gpio, cci_timer2, qup18, ...}; gpio39 = {gpio, ...}. */
++#define NABU_MUX_GPIO   0u
++#define NABU_MUX_QUP18  2u
++
++#define NABU_TOUCH_IRQ_GPIO 39u
++#define NABU_TOUCH_PWR_GPIO 90u
++
++struct nabu_touch_state {
++	vm_offset_t gcc;
++	vm_offset_t tlmm;
++	vm_offset_t se;
++	vm_offset_t qup;
++	struct geni_spi spi;
++	struct nvt_bus bus;
++	bool started;
++	bool mapped;
++};
++
++static struct nabu_touch_state ts;
+ static int touch_sleep_chan;
+ 
+ static uint32_t
+-touch_rd(vm_offset_t base, uint32_t off)
++nbu_rd(vm_offset_t base, uint32_t off)
+ {
+ 	uint32_t v = *(volatile uint32_t *)(base + off);
+ 	__asm__ volatile("dmb oshld" ::: "memory");
+@@ -90,7 +83,7 @@
+ }
+ 
+ static void
+-touch_wr(vm_offset_t base, uint32_t off, uint32_t val)
++nbu_wr(vm_offset_t base, uint32_t off, uint32_t val)
+ {
+ 	__asm__ volatile("dmb oshst" ::: "memory");
+ 	*(volatile uint32_t *)(base + off) = val;
+@@ -98,7 +91,7 @@
+ }
+ 
+ static void
+-touch_wait(unsigned ms)
++nbu_sleep_ms(unsigned ms)
+ {
+ 	uint64_t deadline;
+ 	clock_interval_to_deadline(ms, NSEC_PER_MSEC, &deadline);
+@@ -106,530 +99,326 @@
+ 	thread_block(THREAD_CONTINUE_NULL);
+ }
+ 
++static uint32_t
++nbu_se_rd(void *ctx, uint32_t off)
++{
++	return nbu_rd((vm_offset_t)ctx, off);
++}
++
++static void
++nbu_se_wr(void *ctx, uint32_t off, uint32_t val)
++{
++	nbu_wr((vm_offset_t)ctx, off, val);
++}
++
++static void
++nbu_delay_us(void *ctx, unsigned us)
++{
++	(void)ctx;
++	delay(us);
++}
++
++static void
++nbu_bus_delay_ms(void *ctx, unsigned ms)
++{
++	(void)ctx;
++	delay(ms * 1000u);
++}
++
++static int
++nbu_bus_xfer(void *ctx, const uint8_t *tx, uint8_t *rx, size_t len)
++{
++	(void)ctx;
++	return geni_spi_transfer(&ts.spi, tx, rx, len, 0);
++}
++
++static void
++nbu_pin(unsigned pin, unsigned func, unsigned pull, unsigned drive,
++    int output, int level)
++{
++	uint32_t ctl_off = NABU_TLMM_GPIO(pin);
++	uint32_t io_off = NABU_TLMM_IO(pin);
++	uint32_t cfg;
++
++	if (!ts.tlmm) {
++		return;
++	}
++	if (output) {
++		uint32_t io = nbu_rd(ts.tlmm, io_off);
++		io = (io & ~2u) | (level ? 2u : 0u);
++		nbu_wr(ts.tlmm, io_off, io);
++	}
++	cfg = nbu_rd(ts.tlmm, ctl_off);
++	cfg &= ~0x3ffu;
++	cfg |= ((func & 0xfu) << 2) | (pull & 3u) | ((drive & 7u) << 6) |
++	    (output ? 0x200u : 0u);
++	nbu_wr(ts.tlmm, ctl_off, cfg);
++}
++
+ static bool
+-touch_wait_clear(vm_offset_t base, uint32_t off, uint32_t mask)
+-{
+-	for (unsigned i = 0; i < 5000; ++i) {
+-		if (!(touch_rd(base, off) & mask)) {
+-			return true;
++nbu_clocks(void)
++{
++	static const struct {
++		uint32_t off;
++		const char *name;
++	} branches[] = {
++		{ NABU_GCC_M_AHB, "m_ahb" },
++		{ NABU_GCC_S_AHB, "s_ahb" },
++		{ NABU_GCC_SE_HALT, "se18" },
++	};
++	uint32_t vote, rcg, cfg, dfs;
++	bool ok = true;
++
++	vote = nbu_rd(ts.gcc, NABU_GCC_VOTE);
++	nbu_wr(ts.gcc, NABU_GCC_VOTE, vote | (1u << 1) | (1u << 2) | (1u << 5));
++	rcg = nbu_rd(ts.gcc, NABU_GCC_RCG);
++	cfg = nbu_rd(ts.gcc, NABU_GCC_RCG + 4u);
++	dfs = nbu_rd(ts.gcc, NABU_GCC_RCG + 0x14u);
++	printf("NABU TOUCH: gcc vote %#x -> %#x rcg=%#x cfg=%#x dfs=%#x\n",
++	    vote, nbu_rd(ts.gcc, NABU_GCC_VOTE), rcg, cfg, dfs);
++
++	if (!(dfs & 1u)) {
++		uint32_t newcfg = (cfg & ~(0x371fu | (1u << 20))) | 1u;
++		bool updated = false;
++		nbu_wr(ts.gcc, NABU_GCC_RCG + 4u, newcfg);
++		nbu_wr(ts.gcc, NABU_GCC_RCG, rcg | 1u);
++		for (unsigned i = 0; i < 1000; i++) {
++			if (!(nbu_rd(ts.gcc, NABU_GCC_RCG) & 1u)) {
++				updated = true;
++				break;
++			}
++			delay(1);
+ 		}
+-		delay(1);
+-	}
+-	return false;
+-}
+-
+-static void
+-touch_gpio(unsigned pin, unsigned mux, unsigned pull, unsigned drive, bool out, bool high)
+-{
+-	uint32_t off = TOUCH_GPIO_CFG(pin);
+-	uint32_t cfg = touch_rd(st.gpio, off);
+-	if (out) {
+-		/* Set the desired latch before enabling output (reset is active low). */
+-		touch_wr(st.gpio, TOUCH_GPIO_IO(pin),
+-		    (touch_rd(st.gpio, TOUCH_GPIO_IO(pin)) & ~2u) | (high ? 2u : 0u));
+-	}
+-	cfg &= ~0x3ffu;
+-	cfg |= (mux << 2) | pull | (drive << 6) | (out ? 0x200u : 0u);
+-	touch_wr(st.gpio, off, cfg);
+-}
+-
+-static bool
+-touch_clocks(void)
+-{
+-	/* Vote on only wrapper1 and SE7, preserving other clock users. */
+-	uint32_t mask = (0x0fu << 18) | (1u << 23);
+-	touch_wr(st.gcc, TOUCH_GCC_VOTE, touch_rd(st.gcc, TOUCH_GCC_VOTE) | mask);
+-	uint32_t dfs = touch_rd(st.gcc, TOUCH_RCG + 0x14u);
+-	uint32_t cfg = touch_rd(st.gcc, TOUCH_RCG + 4u);
+-	printf("NABU TOUCH: gcc vote=%#x rcg=%#x cfg=%#x dfs=%#x\n",
+-	    touch_rd(st.gcc, TOUCH_GCC_VOTE), touch_rd(st.gcc, TOUCH_RCG), cfg, dfs);
+-	if (dfs & 1u) {
+-		/* SE CLK_SEL=0 selects DFS performance level 0. Do not alter tables. */
+-		cfg = touch_rd(st.gcc, TOUCH_RCG + 0x1cu);
+-		if ((cfg & 0x371fu) != 1u) {
+-			printf("NABU TOUCH: DFS level0=%#x is not XO/1; need clock integration\n", cfg);
+-			return false;
++		printf("NABU TOUCH: rcg cfg=%#x update=%d\n",
++		    nbu_rd(ts.gcc, NABU_GCC_RCG + 4u), updated);
++		if (!updated) {
++			ok = false;
+ 		}
+ 	} else {
+-		/* XO parent 0, HID divider 1 => 19.2 MHz. No PLL or voltage change. */
+-		cfg = (cfg & ~(0x371fu | (1u << 20))) | 1u;
+-		touch_wr(st.gcc, TOUCH_RCG + 4u, cfg);
+-		touch_wr(st.gcc, TOUCH_RCG, touch_rd(st.gcc, TOUCH_RCG) | 1u);
+-		if (!touch_wait_clear(st.gcc, TOUCH_RCG, 1u)) {
+-			printf("NABU TOUCH: RCG update timeout\n");
+-			return false;
++		printf("NABU TOUCH: rcg uses DFS, not rewriting tables\n");
++	}
++
++	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); i++) {
++		uint32_t v = 0;
++		bool running = false;
++		for (unsigned j = 0; j < 1000; j++) {
++			v = nbu_rd(ts.gcc, branches[i].off);
++			if (!(v & 0x80000000u)) {
++				running = true;
++				break;
++			}
++			delay(1);
+ 		}
+-	}
+-	const uint32_t branches[] = {0x18004, 0x18008, 0x1800c, 0x18010, 0x18144};
+-	for (unsigned i = 0; i < sizeof(branches) / sizeof(branches[0]); ++i) {
+-		if (!touch_wait_clear(st.gcc, branches[i], 1u << 31)) {
+-			printf("NABU TOUCH: GCC branch %#x halted (%#x)\n", branches[i],
+-			    touch_rd(st.gcc, branches[i]));
+-			return false;
++		printf("NABU TOUCH: branch %s=%#x running=%d\n",
++		    branches[i].name, v, running);
++		if (!running) {
++			ok = false;
+ 		}
+ 	}
++	return ok;
++}
++
++static bool
++nbu_geni_init(void)
++{
++	int r;
++
++	memset(&ts.spi, 0, sizeof(ts.spi));
++	ts.spi.se.ctx = (void *)ts.se;
++	ts.spi.se.rd = nbu_se_rd;
++	ts.spi.se.wr = nbu_se_wr;
++	ts.spi.se.delay_us = nbu_delay_us;
++	ts.spi.wrapper.ctx = (void *)ts.qup;
++	ts.spi.wrapper.rd = (uint32_t (*)(void *, uint32_t))nbu_se_rd;
++	ts.spi.wrapper.wr = nbu_se_wr;
++	ts.spi.poll_limit = 200000;
++	ts.spi.poll_only = 1;
++
++	r = geni_spi_read_info(&ts.spi);
++	printf("NABU TOUCH: geni info r=%d fw=%#x proto=%u fifo_dis=%d depth=%u width=%u qup=%#x\n",
++	    r, ts.spi.info.fw_revision, ts.spi.info.protocol,
++	    ts.spi.info.fifo_disabled, ts.spi.info.tx_fifo_depth,
++	    ts.spi.info.fifo_width_bits, ts.spi.info.qup_hw_version);
++	if (r != 0) {
++		return false;
++	}
++	if (ts.spi.info.protocol != GENI_PROTO_SPI) {
++		printf("NABU TOUCH: SE18 is not in SPI protocol mode\n");
++		return false;
++	}
++	if (ts.spi.info.tx_fifo_depth < 4 || ts.spi.info.fifo_width_bits != 32) {
++		printf("NABU TOUCH: unexpected FIFO geometry\n");
++		return false;
++	}
++
++	r = geni_spi_init(&ts.spi);
++	printf("NABU TOUCH: geni init=%d status=%#x\n", r,
++	    nbu_rd(ts.se, NABU_SE_STATUS));
++	if (r != 0) {
++		return false;
++	}
++	geni_spi_setup(&ts.spi, 0, 0);
++	r = geni_spi_set_clock(&ts.spi, 9600000, 19200000, 0);
++	printf("NABU TOUCH: geni clock=%d clk_sel=%#x mclk=%#x\n", r,
++	    nbu_rd(ts.se, 0x7c), nbu_rd(ts.se, 0x48));
++	return r == 0;
++}
++
++static int
++nbu_read_trim(uint32_t addr, uint8_t id[6])
++{
++	int r = nvt_read_trim_id(&ts.bus, addr, id);
++	printf("NABU TOUCH: trim @%#x r=%d id=%02x %02x %02x %02x %02x %02x\n",
++	    addr, r, id[0], id[1], id[2], id[3], id[4], id[5]);
++	return r;
++}
++
++static bool
++nbu_probe_chip(void)
++{
++	uint8_t id[6] = { 0 };
++	uint8_t fw[39];
++	struct nvt_info info;
++	int r;
++
++	/* Engineering reset, then the vendor bootloader reset. */
++	{
++		uint8_t v = 0x5a;
++		r = nvt_write_addr(&ts.bus, 0x7fff80u, &v, 1);
++		printf("NABU TOUCH: eng reset r=%d\n", r);
++	}
++	delay(1000);
++	{
++		uint8_t v = 0x69;
++		r = nvt_write_addr(&ts.bus, 0x3f0feu, &v, 1);
++		printf("NABU TOUCH: bootloader reset r=%d\n", r);
++	}
++	delay(5000);
++	{
++		uint8_t v = 0;
++		r = nvt_write_addr(&ts.bus, 0x3f310u, &v, 1);
++		printf("NABU TOUCH: fast-read disable r=%d\n", r);
++	}
++	delay(5000);
++
++	r = nbu_read_trim(0x3f004u, id);
++	if (r != 0 || !nvt_match_nt36523(id)) {
++		r = nbu_read_trim(0x1f64eu, id);
++	}
++	if (r != 0 || !nvt_match_nt36523(id)) {
++		printf("NABU TOUCH: no NT36523 trim id; irq=%#x status=%#x tx=%#x rx=%#x\n",
++		    nbu_rd(ts.se, NABU_SE_IRQ_STATUS),
++		    nbu_rd(ts.se, NABU_SE_STATUS),
++		    nbu_rd(ts.se, NABU_SE_TX_COUNT),
++		    nbu_rd(ts.se, NABU_SE_RX_COUNT));
++		return false;
++	}
++	printf("NABU TOUCH: NT36523 identified\n");
++
++	r = nvt_read_addr(&ts.bus, 0x2fe78u, fw, sizeof(fw));
++	printf("NABU TOUCH: fwinfo r=%d\n", r);
++	if (r == 0) {
++		(void)nvt_parse_fwinfo(fw, sizeof(fw), &info);
++		printf("NABU TOUCH: fw=%u/%u valid=%d x_num=%u y_num=%u max=%ux%u buttons=%u\n",
++		    info.fw_ver, info.fw_type, info.valid, info.x_num,
++		    info.y_num, info.max_x, info.max_y, info.max_buttons);
++	}
+ 	return true;
+ }
+ 
+-/* Called only for a transfer started by this driver, including a stretched TX. */
+-static void
+-touch_abort(void)
+-{
+-	touch_wr(st.se, SE_CTRL, 2); /* abort M command, release held bus */
+-	bool done = false;
+-	for (unsigned i = 0; i < 5000; ++i) {
+-		if (touch_rd(st.se, SE_IRQ) & (1u << 5)) {
+-			done = true;
+-			break;
+-		}
+-		delay(1);
+-	}
+-	if (!done || !touch_wait_clear(st.se, SE_STATUS, 1u)) {
+-		st.dead = true;
+-		printf("NABU TOUCH: abort failed status=%#x irq=%#x; stopping\n",
+-		    touch_rd(st.se, SE_STATUS), touch_rd(st.se, SE_IRQ));
+-	}
+-	/* Bound drain even if the hardware reports an impossible FIFO count. */
+-	for (unsigned i = 0; i < 64 && (touch_rd(st.se, SE_RX_COUNT) & 0x1ffffffu); ++i) {
+-		(void)touch_rd(st.se, SE_RX);
+-	}
+-	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
+-	if (touch_rd(st.se, SE_TX_COUNT) & 0xfffffffu) {
+-		st.dead = true;
+-		printf("NABU TOUCH: TX FIFO not empty after abort; stopping\n");
+-	}
+-}
+-
+-/* Keep all observed bits for diagnostics, even if a watermark was cleared. */
+-static uint32_t
+-touch_irq(void)
+-{
+-	st.irq_last = touch_rd(st.se, SE_IRQ);
+-	st.irq_status |= st.irq_last;
+-	return st.irq_last;
+-}
+-
+-/* One Linux-style FIFO message. TX is at most 3 bytes; RX at most 90. */
+-static int
+-touch_msg_run(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+-    unsigned nr, bool stretch)
+-{
+-	if (st.dead || nt > 3 || nr > 90 || (nt && nr) || (!nt && !nr)) {
+-		return EIO;
+-	}
+-	if (!touch_wait_clear(st.se, SE_STATUS, 1u)) {
+-		st.dead = true; /* no other SE7 owner is supported */
+-		return EBUSY;
+-	}
+-	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
+-	touch_wr(st.se, SE_TX_WM, nt ? 1u : 0u);
+-	touch_wr(st.se, nr ? SE_RX_LEN : SE_TX_LEN, nr ? nr : nt);
+-	touch_wr(st.se, SE_CMD, ((nr ? 2u : 1u) << 27) |
+-	    ((uint32_t)addr << 9) | (stretch ? 4u : 0u));
+-	int err = ETIMEDOUT;
+-	for (unsigned i = 0; i < 20000; ++i) {
+-		uint32_t irq = touch_irq();
+-		if (irq & SE_ERRORS) {
+-			err = (irq & SE_NACK) ? ENXIO : EIO;
+-			/* A completed NACK is normal during address probing. Aborting an
+-			 * idle sequencer may never produce ABORT_DONE. Wait for completion
+-			 * and leave a clean idle engine available for the other IC. */
+-			for (unsigned j = 0; j < 5000 && !(irq & SE_DONE); ++j) {
+-				delay(1);
+-				irq = touch_irq();
++static void
++nbu_poll_points(void)
++{
++	uint8_t frame[NVT_POINT_DATA_LEN];
++	struct nvt_contact contacts[NVT_MAX_FINGERS];
++	unsigned good = 0, bad = 0;
++
++	for (unsigned i = 0; i < 100; i++) {
++		int n = -1;
++		if (nvt_read_point_frame(&ts.bus, frame) == 0) {
++			n = nvt_parse_points(frame, 1600, 2560, contacts,
++			    NVT_MAX_FINGERS);
++			if (bad) {
++				printf("NABU TOUCH: point read recovered after %u errors\n", bad);
++				bad = 0;
+ 			}
+-			if ((irq & SE_DONE) && !(touch_rd(st.se, SE_STATUS) & 1u) &&
+-			    !(touch_rd(st.se, SE_TX_COUNT) & 0xfffffffu) &&
+-			    !(touch_rd(st.se, SE_RX_COUNT) & 0x1ffffffu)) {
+-				touch_wr(st.se, SE_IRQ_CLR, irq);
+-				return err;
++			good++;
++			if (n > 0) {
++				printf("NABU TOUCH: frame %u contacts=%d f0=%02x %02x %02x %02x %02x %02x\n",
++				    i, n, frame[0], frame[1], frame[2], frame[3],
++				    frame[4], frame[5]);
++				for (int k = 0; k < n; k++) {
++					printf("NABU TOUCH: point id=%d x=%d y=%d p=%d\n",
++					    contacts[k].id, contacts[k].x, contacts[k].y,
++					    contacts[k].pressure);
++				}
+ 			}
+-			break;
+-		}
+-		if (nt && !st.sent && (irq & SE_TX_WM_IRQ)) {
+-			uint32_t word = 0;
+-			for (unsigned j = 0; j < nt; ++j) {
+-				word |= (uint32_t)tx[j] << (8u * j);
+-			}
+-			touch_wr(st.se, SE_TX, word);
+-			st.sent = nt;
+-			touch_wr(st.se, SE_TX_WM, 0);
+-		}
+-		uint32_t count = touch_rd(st.se, SE_RX_COUNT) & 0x1ffffffu;
+-		if (count > 64 || count > (nr - st.got + 3u) / 4u) {
+-			err = EIO;
+-			break;
+-		}
+-		while (count--) {
+-			uint32_t word = touch_rd(st.se, SE_RX);
+-			for (unsigned j = 0; j < 4 && st.got < nr; ++j) {
+-				rx[st.got++] = (uint8_t)(word >> (8u * j));
++		} else {
++			if (bad++ == 0) {
++				printf("NABU TOUCH: point read failed at frame %u\n", i);
+ 			}
+ 		}
+-		/* DONE is checked after draining RX, so final short words aren't lost. */
+-		if (irq & SE_DONE) {
+-			/* Re-sample after the final drain; a late error must beat DONE. */
+-			irq = touch_irq();
+-			if (irq & SE_ERRORS) {
+-				continue;
+-			}
+-			touch_wr(st.se, SE_IRQ_CLR, irq);
+-			if (st.got == nr && st.sent == nt) {
+-				return 0;
+-			}
+-			err = EIO;
+-			break;
+-		}
+-		/* Preserve DONE/errors if they arrive during this iteration. */
+-		touch_wr(st.se, SE_IRQ_CLR, irq & (SE_RX_WM_IRQ | SE_RX_LAST | SE_TX_WM_IRQ));
+-		delay(1);
+-	}
+-	touch_abort();
+-	return err;
+-}
+-
+-static int
+-touch_msg(uint8_t addr, const uint8_t *tx, unsigned nt, uint8_t *rx,
+-    unsigned nr, bool stretch)
+-{
+-	st.irq_status = st.irq_last = 0;
+-	st.sent = st.got = 0;
+-	int err = touch_msg_run(addr, tx, nt, rx, nr, stretch);
+-	if (st.probing) {
+-		printf("NABU TOUCH: probe xfer addr=%#x %s len=%u stretch=%u err=%d irq=%#x seen=%#x tx=%u rx=%u status=%#x\n",
+-		    addr, nr ? "read" : "write", nr ? nr : nt, stretch ? 1u : 0u,
+-		    err, st.irq_last, st.irq_status, st.sent, st.got,
+-		    touch_rd(st.se, SE_STATUS));
+-	}
+-	return err;
+-}
+-
+-static int
+-touch_read(uint8_t addr, uint16_t reg, bool wide, uint8_t *buf, unsigned len)
+-{
+-	uint8_t ptr[2] = {(uint8_t)(reg >> 8), (uint8_t)reg};
+-	int err = touch_msg(addr, wide ? ptr : ptr + 1, wide ? 2u : 1u,
+-	    NULL, 0, true);
+-	if (err) {
+-		return err;
+-	}
+-	/* STOP_STRETCH on the pointer write retains the bus for a repeated START. */
+-	return touch_msg(addr, NULL, 0, buf, len, false);
+-}
+-
+-static int
+-touch_goodix_ack(void)
+-{
+-	const uint8_t ack[3] = {GOODIX_EVENT_REG >> 8, GOODIX_EVENT_REG & 0xffu, 0};
+-	return touch_msg(0x5d, ack, sizeof(ack), NULL, 0, false);
+-}
+-
+-/* Raw read only: 0x8240 is the vendor's generic/older VERSION candidate,
+- * not a second accepted GT9896 identity. Never try a four-byte Berlin pointer:
+- * on this 16-bit IC the extra bytes would be register data writes. */
+-static int
+-touch_probe_info(uint16_t reg, uint8_t *buf)
+-{
+-	memset(buf, 0xa5, 32);
+-	int err = touch_read(0x5d, reg, true, buf, 32);
+-	printf("NABU TOUCH: probe info reg=%#x len=32 err=%d irq=%#x seen=%#x\n",
+-	    reg, err, st.irq_last, st.irq_status);
+-	if (!err) {
+-		for (unsigned off = 0; off < 32; off += 16) {
+-			char line[49];
+-			for (unsigned j = 0; j < 16; ++j) {
+-				(void)snprintf(line + j * 3u, 4, "%02x ", buf[off + j]);
+-			}
+-			printf("NABU TOUCH: probe raw %#x: %s\n", reg + off, line);
+-		}
+-	}
+-	return err;
+-}
+-
+-static unsigned
+-touch_be16(const uint8_t *p)
+-{
+-	return ((unsigned)p[0] << 8) | p[1];
+-}
+-
+-static bool
+-touch_checksum(const uint8_t *buf, unsigned len)
+-{
+-	if (len < 2) {
+-		return false;
+-	}
+-	unsigned sum = 0;
+-	for (unsigned i = 0; i + 2 < len; ++i) {
+-		sum += buf[i];
+-	}
+-	return (sum & 0xffffu) == touch_be16(buf + len - 2);
+-}
+-
+-static void
+-touch_report(uint32_t mask, const int *x, const int *y)
+-{
+-	for (unsigned id = 0; id < TOUCH_MAX; ++id) {
+-		uint32_t bit = 1u << id;
+-		if (mask & bit) {
+-			if (!(st.active & bit) || x[id] != st.x[id] || y[id] != st.y[id]) {
+-				nabu_hid_touch((int)id, 1, x[id], y[id]);
+-			}
+-			st.x[id] = x[id];
+-			st.y[id] = y[id];
+-		} else if (st.active & bit) {
+-			nabu_hid_touch((int)id, 0, st.x[id], st.y[id]);
+-		}
+-	}
+-	st.active = mask;
+-}
+-
+-static int
+-touch_goodix(void)
+-{
+-	uint8_t buf[90];
+-	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
+-	uint32_t mask = 0;
+-	int err = touch_read(0x5d, GOODIX_EVENT_REG, true, buf, GOODIX_HEAD_LEN);
+-	if (err) {
+-		return err;
+-	}
+-	if (!(buf[0] & 0x80u)) {
+-		/* Do not acknowledge firmware/config requests that we cannot service. */
+-		if (buf[0] & 0x40u) {
+-			return ENOTSUP;
+-		}
+-		return 0; /* no new touch frame: retain current contacts */
+-	}
+-	if (!touch_checksum(buf, GOODIX_HEAD_LEN)) {
+-		return EIO; /* header untrusted: no write to the IC */
+-	}
+-	unsigned n = buf[2] & 15u;
+-	if (n > TOUCH_MAX) {
+-		(void)touch_goodix_ack();
+-		return EIO;
+-	}
+-	if (n) {
+-		err = touch_read(0x5d, GOODIX_EVENT_REG + GOODIX_HEAD_LEN, true,
+-		    buf + GOODIX_HEAD_LEN, n * GOODIX_POINT_LEN + 2u);
+-		if (err) {
+-			return err;
+-		}
+-		if (!touch_checksum(buf + GOODIX_HEAD_LEN, n * GOODIX_POINT_LEN + 2u)) {
+-			(void)touch_goodix_ack();
+-			return EIO;
+-		}
+-	}
+-	for (unsigned i = 0; i < n; ++i) {
+-		const uint8_t *p = buf + GOODIX_HEAD_LEN + i * GOODIX_POINT_LEN;
+-		unsigned id = p[0] >> 4;
+-		unsigned px = touch_be16(p + 2), py = touch_be16(p + 4);
+-		/* Low nibble 1/3 denotes pen data in the vendor parser. */
+-		if ((p[0] & 15u) == 1u || (p[0] & 15u) == 3u || id >= TOUCH_MAX ||
+-		    (mask & (1u << id)) || px > 1079 || py > 2399) {
+-			(void)touch_goodix_ack();
+-			return EIO;
+-		}
+-		mask |= 1u << id;
+-		x[id] = (int)px;
+-		y[id] = (int)py;
+-	}
+-	err = touch_goodix_ack();
+-	if (!err) {
+-		touch_report(mask, x, y);
+-	}
+-	return err;
+-}
+-
+-static int
+-touch_focaltech(void)
+-{
+-	uint8_t buf[63];
+-	int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
+-	uint32_t mask = 0, seen = 0;
+-	int err = touch_read(0x38, 0, false, buf, sizeof(buf));
+-	if (err) {
+-		return err;
+-	}
+-	unsigned n = buf[2] & 15u, active = 0;
+-	if ((buf[0] & 0x70u) || n > TOUCH_MAX) {
+-		return EIO;
+-	}
+-	for (unsigned i = 0; i < TOUCH_MAX; ++i) {
+-		const uint8_t *p = buf + 3u + 6u * i;
+-		unsigned id = p[2] >> 4, event = p[0] >> 6;
+-		if (id >= TOUCH_MAX) {
+-			break; /* vendor's unused-record sentinel */
+-		}
+-		if (seen & (1u << id)) {
+-			return EIO;
+-		}
+-		seen |= 1u << id;
+-		if (event == 1u) {
+-			continue; /* UP record */
+-		}
+-		if (event == 3u) {
+-			return EIO;
+-		}
+-		unsigned px = ((unsigned)(p[0] & 15u) << 8) | p[1];
+-		unsigned py = ((unsigned)(p[2] & 15u) << 8) | p[3];
+-		if (px > 1079 || py > 2399) {
+-			return EIO;
+-		}
+-		mask |= 1u << id;
+-		x[id] = (int)px;
+-		y[id] = (int)py;
+-		++active;
+-	}
+-	if (active != n) {
+-		return EIO;
+-	}
+-	touch_report(mask, x, y);
+-	return 0;
+-}
+-
+-static bool
+-touch_se_init(void)
+-{
+-	uint32_t fw = touch_rd(st.se, SE_FW);
+-	uint32_t tx = touch_rd(st.se, SE_HW_TX), rx = touch_rd(st.se, SE_HW_RX);
+-	printf("NABU TOUCH: se7 fw=%#x proto=%u status=%#x tx=%#x rx=%#x ios=%#x\n",
+-	    fw, (fw >> 8) & 0xffu, touch_rd(st.se, SE_STATUS), tx, rx,
+-	    touch_rd(st.se, 0x908));
+-	if (((fw >> 8) & 0xffu) != 3u || (touch_rd(st.se, 0x64) & 1u) ||
+-	    ((tx >> 24) & 0x3fu) != 32u || ((rx >> 24) & 0x3fu) != 32u ||
+-	    ((tx >> 16) & 0x3fu) < 2u || ((rx >> 16) & 0x3fu) < 2u) {
+-		printf("NABU TOUCH: need ABL-loaded I2C firmware and 32-bit FIFOs; probes skipped\n");
+-		return false;
+-	}
+-	if (touch_rd(st.se, SE_STATUS) & 0x1001u) {
+-		printf("NABU TOUCH: SE7 already busy; probes skipped\n");
+-		return false;
+-	}
+-	touch_wr(st.se, 0xe18, 0); /* no GSI events */
+-	touch_wr(st.se, 0xe1c, 0); /* mask external IRQ routing; poll local status */
+-	touch_wr(st.se, 0x644, 0);
+-	touch_wr(st.se, SE_IRQ_CLR, 0xffffffffu);
+-	touch_wr(st.se, 0x648, 0xffffffffu);
+-	touch_wr(st.se, SE_DMA, 0);
+-	touch_wr(st.se, 0x28, touch_rd(st.se, 0x28) | 0x7fu);
+-	touch_wr(st.se, 0xe30, touch_rd(st.se, 0xe30) | 0x0fu);
+-	touch_wr(st.se, 0x24, 0x7f);
+-	touch_wr(st.se, 0x20, 1);
+-	touch_wr(st.se, SE_CLK_SEL, 0);
+-	touch_wr(st.se, SE_MCLK, (7u << 4) | 1u);
+-	touch_wr(st.se, SE_SCL, (10u << 20) | (11u << 10) | 26u); /* 100 kHz */
+-	/* Linux 8-bit I2C packing: MSB on the wire, LSB byte first in FIFO. */
+-	touch_wr(st.se, 0x254, 0);
+-	touch_wr(st.se, 0x260, SE_PACK0);
+-	touch_wr(st.se, 0x264, SE_PACK1);
+-	touch_wr(st.se, 0x284, SE_PACK0);
+-	touch_wr(st.se, 0x288, SE_PACK1);
+-	touch_wr(st.se, SE_TX_WM, 0);
+-	touch_wr(st.se, 0x810, 0);
+-	touch_wr(st.se, 0x814, ((rx >> 16) & 0x3fu) - 1u);
+-	touch_wr(st.se, SE_IRQ_EN, SE_EVENTS);
+-	printf("NABU TOUCH: packing tx=%#x/%#x rx=%#x/%#x gran=%#x\n",
+-	    touch_rd(st.se, 0x260), touch_rd(st.se, 0x264),
+-	    touch_rd(st.se, 0x284), touch_rd(st.se, 0x288), touch_rd(st.se, 0x254));
+-	if (touch_rd(st.se, 0x260) != SE_PACK0 || touch_rd(st.se, 0x264) != SE_PACK1 ||
+-	    touch_rd(st.se, 0x284) != SE_PACK0 || touch_rd(st.se, 0x288) != SE_PACK1 ||
+-	    touch_rd(st.se, 0x254) != 0) {
+-		printf("NABU TOUCH: packing readback mismatch; probes skipped\n");
+-		return false;
+-	}
+-	if ((touch_rd(st.se, SE_TX_COUNT) & 0xfffffffu) ||
+-	    (touch_rd(st.se, SE_RX_COUNT) & 0x1ffffffu)) {
+-		printf("NABU TOUCH: inherited FIFO data; probes skipped\n");
+-		return false;
+-	}
+-	return true;
+-}
+-
+-static void
+-touch_thread(void *arg, wait_result_t result)
+-{
+-	unsigned delay_s = 45;
++		delay(20000);
++	}
++	printf("NABU TOUCH: polling done good=%u bad=%u\n", good, bad);
++}
++
++static void
++nbu_touch_thread(void *arg, wait_result_t result)
++{
++	unsigned delay_s = 15;
++	int power_error;
++
+ 	(void)arg;
+ 	(void)result;
+-	/*
+-	 * Start late (boot-arg nabutouchdelay, seconds): if the bus access
+-	 * below hangs the SoC, the persistent log and the GUI got there first.
+-	 */
+ 	(void)PE_parse_boot_argn("nabutouchdelay", &delay_s, sizeof(delay_s));
+-	printf("NABU TOUCH: starting in %u s\n", delay_s);
+-	touch_wait(delay_s * 1000u);
+-	printf("NABU TOUCH: mapping GCC/TLMM/SE7\n");
+-	st.gcc = ml_io_map(TOUCH_GCC_PA, 0x60000);
+-	st.gpio = ml_io_map(TOUCH_NORTH_PA, 0x5b000);
+-	st.se = ml_io_map(TOUCH_SE_PA, 0x4000);
+-	if (!st.gcc || !st.gpio || !st.se) {
+-		printf("NABU TOUCH: MMIO mapping failed\n");
++	printf("NABU TOUCH: NT36523 probe starting in %u s\n", delay_s);
++	nbu_sleep_ms(delay_s * 1000u);
++	printf("NABU TOUCH: mapping SE18/GCC/TLMM\n");
++
++	ts.gcc = ml_io_map(NABU_GCC_PA, 0x60000);
++	ts.tlmm = ml_io_map(NABU_TLMM_PA, NABU_TLMM_SIZE);
++	ts.se = ml_io_map(NABU_SE_PA, 0x4000);
++	ts.qup = ml_io_map(NABU_QUP_PA, 0x6000);
++	if (!ts.gcc || !ts.tlmm || !ts.se || !ts.qup) {
++		printf("NABU TOUCH: MMIO map failed gcc=%#lx tlmm=%#lx se=%#lx qup=%#lx\n",
++		    (unsigned long)ts.gcc, (unsigned long)ts.tlmm,
++		    (unsigned long)ts.se, (unsigned long)ts.qup);
+ 		goto out;
+ 	}
+-	if (!touch_clocks() || !touch_se_init()) {
++	ts.mapped = true;
++
++	power_error = nabu_rpmh_vreg_enable("ldoc11", 3200);
++	printf("NABU TOUCH: L11C vote=%d\n", power_error);
++	nbu_pin(23, NABU_MUX_QUP18, 0, 2, 0, 0);
++	nbu_pin(24, NABU_MUX_QUP18, 0, 2, 0, 0);
++	nbu_pin(25, NABU_MUX_QUP18, 0, 2, 0, 0);
++	nbu_pin(26, NABU_MUX_QUP18, 0, 2, 0, 0);
++	nbu_pin(NABU_TOUCH_IRQ_GPIO, NABU_MUX_GPIO, 1, 2, 0, 0);
++	nbu_pin(NABU_TOUCH_PWR_GPIO, NABU_MUX_GPIO, 0, 0, 1, 1);
++	printf("NABU TOUCH: pins 23/24/25/26=%#x %#x %#x %#x irq39=%#x pwr90=%#x io39=%#x\n",
++	    nbu_rd(ts.tlmm, NABU_TLMM_GPIO(23)), nbu_rd(ts.tlmm, NABU_TLMM_GPIO(24)),
++	    nbu_rd(ts.tlmm, NABU_TLMM_GPIO(25)), nbu_rd(ts.tlmm, NABU_TLMM_GPIO(26)),
++	    nbu_rd(ts.tlmm, NABU_TLMM_GPIO(39)), nbu_rd(ts.tlmm, NABU_TLMM_GPIO(90)),
++	    nbu_rd(ts.tlmm, NABU_TLMM_IO(39)));
++	delay(10000);
++
++	if (!nbu_clocks()) {
++		printf("NABU TOUCH: clock setup failed\n");
+ 		goto out;
+ 	}
+-	printf("NABU TOUCH: TLMM reset=%#x irq=%#x vdd90=%#x; voting L11C through RPMh\n",
+-	    touch_rd(st.gpio, TOUCH_GPIO_IO(8)), touch_rd(st.gpio, TOUCH_GPIO_IO(9)),
+-	    touch_rd(st.gpio, TOUCH_GPIO_IO(90)));
+-	/* Keep the IC in reset while its rails settle; IRQ stays an input. */
+-	touch_gpio(9, 0, 3, 3, false, false); /* IRQ input, 8 mA, pull-up */
+-	touch_gpio(8, 0, 3, 3, true, false);
+-	int power_error = nabu_rpmh_vreg_enable("ldoc11", 3200);
+-	if (power_error) {
+-		printf("NABU TOUCH: L11C RPMh enable failed %d; probes skipped\n", power_error);
++	if (!nbu_geni_init()) {
++		printf("NABU TOUCH: GENI SPI init failed\n");
+ 		goto out;
+ 	}
+-	touch_gpio(90, 0, 0, 0, true, true); /* board digital power enable */
+-	touch_wait(10); /* conservative rail settling; not a DT timing value */
+-	touch_gpio(6, 1, 0, 0, false, false); /* qup11 SDA/SCL, 2 mA */
+-	touch_gpio(7, 1, 0, 0, false, false);
+-	/* Vendor GT9896 dev_confirm: reset low 2 ms, then high. */
+-	touch_gpio(8, 0, 3, 3, true, false);
+-	touch_wait(2);
+-	touch_gpio(8, 0, 3, 3, true, true);
+-	touch_wait(300); /* exceeds vendor 5 ms test + 95 ms post-test wait */
+-	uint8_t gid[32], legacy[32], fid1 = 0, fid2 = 0;
+-	st.probing = true;
+-	int ge = touch_probe_info(GOODIX_PID_REG, gid);
+-	printf("NABU TOUCH: probe 0x5d err=%d pid=%02x%02x%02x%02x fw=%02x.%02x.%02x.%02x irq=%#x\n",
+-	    ge, gid[0], gid[1], gid[2], gid[3], gid[8], gid[9], gid[10], gid[11], st.irq_status);
+-	(void)touch_probe_info(0x8240, legacy);
+-	int fe1 = touch_read(0x38, 0xa3, false, &fid1, 1);
+-	int fe2 = touch_read(0x38, 0x9f, false, &fid2, 1);
+-	printf("NABU TOUCH: probe 0x38 err=%d/%d chip-id=%02x:%02x irq=%#x\n",
+-	    fe1, fe2, fid1, fid2, st.irq_status);
+-	st.probing = false;
+-	bool goodix = !ge && gid[0] == '9' && gid[1] == '8' && gid[2] == '9' && gid[3] == '6';
+-	bool fts = !fe1 && !fe2 && fid1 == 0x54 && fid2 == 0x52;
+-	if (st.dead || goodix == fts) {
+-		printf("NABU TOUCH: no unique supported IC (goodix=%d fts=%d dead=%d); stopping\n",
+-		    goodix, fts, st.dead);
+-		goto out;
+-	}
+-	st.kind = goodix ? TOUCH_GOODIX : TOUCH_FTS;
+-	printf("NABU TOUCH: selected %s, 1080x2400, poll=10ms irq-hint=%d\n",
+-	    goodix ? "GT9896 Yellowstone" : "Focaltech 54:52", st.irq_hint);
+-	unsigned errors = 0, ticks = 0;
+-	while (!st.dead) {
+-		/* Optional IRQ hint still reads every 100ms, and always while down. */
+-		if (!st.irq_hint || st.active || !(touch_rd(st.gpio, TOUCH_GPIO_IO(9)) & 1u) ||
+-		    (++ticks % 10u) == 0) {
+-			int err = st.kind == TOUCH_GOODIX ? touch_goodix() : touch_focaltech();
+-			if (err) {
+-				if ((errors++ % 100u) == 0) {
+-					printf("NABU TOUCH: report err=%d irq=%#x\n", err, st.irq_status);
+-				}
+-				if (errors == 10) {
+-					touch_report(0, st.x, st.y); /* release after persistent bad reads */
+-				}
+-			} else {
+-				errors = 0;
+-			}
+-		}
+-		touch_wait(10);
+-	}
+-	touch_report(0, st.x, st.y);
++	ts.bus.ctx = &ts.spi;
++	ts.bus.xfer = nbu_bus_xfer;
++	ts.bus.delay_ms = nbu_bus_delay_ms;
++
++	if (nbu_probe_chip()) {
++		nbu_poll_points();
++	}
++
+ out:
+ 	(void)thread_terminate(current_thread());
+ 	thread_block(THREAD_CONTINUE_NULL);
+@@ -640,21 +429,23 @@
+ {
+ 	int enabled = 1;
+ 	thread_t thread;
+-	if (st.started) {
++	kern_return_t kr;
++
++	if (ts.started) {
+ 		return;
+ 	}
+-	st.started = true;
++	ts.started = true;
+ 	(void)PE_parse_boot_argn("nabutouch", &enabled, sizeof(enabled));
+-	(void)PE_parse_boot_argn("nabutouchirq", &st.irq_hint, sizeof(st.irq_hint));
+ 	if (!enabled) {
+ 		printf("NABU TOUCH: disabled (nabutouch=0)\n");
+ 		return;
+ 	}
+-	kern_return_t kr = kernel_thread_start(touch_thread, NULL, &thread);
++	kr = kernel_thread_start(nbu_touch_thread, NULL, &thread);
+ 	if (kr == KERN_SUCCESS) {
+ 		thread_deallocate(thread);
+ 	} else {
+ 		printf("NABU TOUCH: kernel_thread_start failed %d\n", kr);
+ 	}
+ }
++
+ #endif /* ARM64_BOARD_CONFIG_NABU */
+diff --git a/bsd/dev/nabu_geni_spi.c b/bsd/dev/nabu_geni_spi.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/nabu_geni_spi.c
+@@ -0,0 +1,348 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++#include "nabu_geni_spi.h"
++
++static uint32_t rd(struct geni_spi *s, uint32_t reg) { return s->se.rd(s->se.ctx, reg); }
++static void wr(struct geni_spi *s, uint32_t reg, uint32_t v) { s->se.wr(s->se.ctx, reg, v); }
++static void rmw_set(struct geni_spi *s, uint32_t reg, uint32_t bits) { wr(s, reg, rd(s, reg) | bits); }
++
++static void irq_clear(struct geni_spi *s) {
++    wr(s, SE_GSI_EVENT_EN, 0);
++    wr(s, SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
++    wr(s, SE_GENI_S_IRQ_CLEAR, 0xffffffffu);
++    wr(s, SE_DMA_TX_IRQ_CLR, 0xffffffffu);
++    wr(s, SE_DMA_RX_IRQ_CLR, 0xffffffffu);
++    wr(s, SE_IRQ_EN, 0xffffffffu);
++}
++
++// FIFO words hold fifo_width_bits/8 packed bytes at 8 bits per word.
++static unsigned bytes_per_word(const struct geni_spi *s) { return s->info.fifo_width_bits / 8; }
++
++int geni_spi_read_info(struct geni_spi *s) {
++    if (!s || !s->se.rd || !s->wrapper.rd) return GENI_ERR_PARAM;
++    uint32_t fw = rd(s, GENI_FW_REVISION_RO);
++    s->info.fw_revision = fw;
++    s->info.protocol = (fw >> GENI_FW_PROTO_SHIFT) & 0xff;
++    s->info.if_disable = rd(s, GENI_IF_DISABLE_RO);
++    s->info.fifo_disabled = (s->info.if_disable & GENI_FIFO_IF_DISABLE) != 0;
++    s->info.geni_status = rd(s, SE_GENI_STATUS);
++    s->info.hw_param0 = rd(s, SE_HW_PARAM_0);
++    s->info.qup_hw_version = s->wrapper.rd(s->wrapper.ctx, QUPV3_HW_VER_REG);
++    uint32_t major = s->info.qup_hw_version >> 28, minor = (s->info.qup_hw_version >> 16) & 0xfff;
++    uint32_t mask = ((major == 3 && minor >= 10) || major > 3) ? 0xff0000u : 0x3f0000u;
++    s->info.tx_fifo_depth = (s->info.hw_param0 & mask) >> 16;
++    s->info.fifo_width_bits = (s->info.hw_param0 >> 24) & 0x3f;
++    return 0;
++}
++
++// Packing for 8-bit words, 4 per FIFO word, MSB first inside each byte; same values the vendor sequence programs.
++static void config_packing(struct geni_spi *s, unsigned bpw, unsigned pack_words, int msb_first) {
++    uint32_t cfg[GENI_PACK_VECTORS] = {0};
++    int idx_start = msb_first ? (int)bpw - 1 : 0, idx = idx_start;
++    int idx_delta = msb_first ? -8 : 8;
++    unsigned ceil_bpw = (bpw + 7) & ~7u;
++    unsigned iter = ceil_bpw * pack_words / 8;
++    int temp_bpw = (int)bpw;
++    if (iter == 0 || iter > GENI_PACK_VECTORS) return;
++    for (unsigned i = 0; i < iter; i++) {
++        int len = (temp_bpw < 8 ? temp_bpw : 8) - 1;
++        cfg[i] = ((uint32_t)idx << GENI_PACK_START_SHIFT) | ((uint32_t)(msb_first != 0) << GENI_PACK_DIR_SHIFT) |
++                 ((uint32_t)len << GENI_PACK_LEN_SHIFT);
++        if (temp_bpw <= 8) {
++            idx = (int)(i + 1) * 8 + idx_start;
++            temp_bpw = (int)bpw;
++        } else {
++            idx += idx_delta;
++            temp_bpw -= 8;
++        }
++    }
++    cfg[iter - 1] |= GENI_PACK_STOP;
++    uint32_t cfg0 = cfg[0] | (cfg[1] << GENI_PACK_VECTOR_SHIFT);
++    uint32_t cfg1 = cfg[2] | (cfg[3] << GENI_PACK_VECTOR_SHIFT);
++    wr(s, SE_GENI_TX_PACKING_CFG0, cfg0);
++    wr(s, SE_GENI_TX_PACKING_CFG1, cfg1);
++    wr(s, SE_GENI_RX_PACKING_CFG0, cfg0);
++    wr(s, SE_GENI_RX_PACKING_CFG1, cfg1);
++    if (pack_words || bpw == 32) wr(s, SE_GENI_BYTE_GRAN, bpw / 16);
++}
++
++static void set_word_len(struct geni_spi *s, unsigned bpw, int msb_first) {
++    unsigned pack = (s->info.fifo_width_bits % bpw) ? 1 : s->info.fifo_width_bits / bpw;
++    config_packing(s, bpw, pack, msb_first);
++    wr(s, SE_SPI_WORD_LEN, (bpw - GENI_WORD_LEN_MIN) & 0x3ff);
++}
++
++int geni_spi_init(struct geni_spi *s) {
++    int r = geni_spi_read_info(s);
++    if (r) return r;
++    if (s->info.protocol != GENI_PROTO_SPI) return GENI_ERR_PROTO;
++    if (s->use_dma && (!s->dma.tx_virt || !s->dma.rx_virt || !s->dma.tx_phys || !s->dma.rx_phys || !s->dma.size))
++        return GENI_ERR_PARAM;
++    if (s->info.fifo_disabled && !s->allow_fifo_disabled && !s->use_dma) return GENI_ERR_NOTSUP;   // GPI DMA path not implemented
++    if (s->info.tx_fifo_depth < 4 || s->info.fifo_width_bits != 32) return GENI_ERR_NODEV;
++    // geni_se_init
++    irq_clear(s);
++    rmw_set(s, SE_GENI_CGC_CTRL, GENI_DEFAULT_CGC_EN);
++    rmw_set(s, SE_DMA_GENERAL_CFG, GENI_AHB_SEC_SLV_CGC_ON | GENI_DMA_AHB_SLV_CGC_ON | GENI_DMA_TX_CGC_ON | GENI_DMA_RX_CGC_ON);
++    wr(s, GENI_OUTPUT_CTRL, GENI_DEFAULT_IO_OUTPUT_CTRL);
++    wr(s, GENI_FORCE_DEFAULT_REG, GENI_FORCE_DEFAULT);
++    rmw_set(s, SE_IRQ_EN, GENI_IRQ_M | GENI_IRQ_S | GENI_IRQ_DMA_TX | GENI_IRQ_DMA_RX);
++    wr(s, SE_GENI_DMA_MODE_EN, rd(s, SE_GENI_DMA_MODE_EN) & ~GENI_DMA_MODE_EN);
++    wr(s, SE_GSI_EVENT_EN, 0);
++    wr(s, SE_GENI_RX_WATERMARK_REG, s->info.tx_fifo_depth - 3);
++    wr(s, SE_GENI_RX_RFR_WATERMARK_REG, s->info.tx_fifo_depth - 2);
++    rmw_set(s, SE_GENI_M_IRQ_EN, GENI_M_COMMON_IRQ_EN);
++    rmw_set(s, SE_GENI_S_IRQ_EN, GENI_S_COMMON_IRQ_EN);
++    s->tx_wm = 1;
++    uint32_t major = s->info.qup_hw_version >> 28, minor = (s->info.qup_hw_version >> 16) & 0xfff;
++    s->oversampling = (major == 1 && minor == 0) ? 2 : 1;
++    // FIFO mode selection
++    irq_clear(s);
++    rmw_set(s, SE_GENI_M_IRQ_EN, GENI_M_CMD_DONE | GENI_M_TX_FIFO_WATERMARK | GENI_M_RX_FIFO_WATERMARK | GENI_M_RX_FIFO_LAST);
++    wr(s, SE_GENI_DMA_MODE_EN, rd(s, SE_GENI_DMA_MODE_EN) & ~GENI_DMA_MODE_EN);
++    wr(s, SE_SPI_LOOPBACK, 0);
++    wr(s, SE_SPI_DEMUX_SEL, 0);
++    wr(s, SE_SPI_CPHA, 0);
++    wr(s, SE_SPI_CPOL, 0);
++    wr(s, SE_SPI_DEMUX_OUTPUT_INV, 0);
++    wr(s, SE_SPI_TRANS_CFG, rd(s, SE_SPI_TRANS_CFG) & ~GENI_CS_TOGGLE);   // chip select is never driven manually
++    s->cur_bpw = 0;
++    s->cur_speed_hz = 0;
++    s->last_mode = 0;
++    s->last_cs = 0;
++    if (!s->poll_limit) s->poll_limit = 1000000;
++    if (s->use_dma) {
++        // geni_se_select_dma_mode: drop the FIFO interrupt sources and switch the engine to its DMA master.
++        irq_clear(s);
++        wr(s, SE_GENI_M_IRQ_EN, rd(s, SE_GENI_M_IRQ_EN) & ~(GENI_M_CMD_DONE | GENI_M_TX_FIFO_WATERMARK | GENI_M_RX_FIFO_WATERMARK | GENI_M_RX_FIFO_LAST));
++        wr(s, SE_GENI_DMA_MODE_EN, rd(s, SE_GENI_DMA_MODE_EN) | GENI_DMA_MODE_EN);
++    }
++    if (s->poll_only == 1) wr(s, SE_IRQ_EN, 0);     // status registers stay pollable; no unhandled interrupt reaches the GIC
++    return 0;
++}
++
++int geni_spi_setup(struct geni_spi *s, unsigned mode, unsigned chip_select) {
++    if (chip_select > 15) return GENI_ERR_PARAM;
++    unsigned changed = s->last_mode ^ mode;
++    int cs_changed = ((unsigned)s->last_cs != chip_select);
++    s->last_cs = (int)chip_select;
++    s->last_mode = mode;
++    if (changed & GENI_SPI_LSB_FIRST) s->cur_bpw = 0;
++    if (changed & GENI_SPI_LOOP) wr(s, SE_SPI_LOOPBACK, (mode & GENI_SPI_LOOP) ? GENI_LOOPBACK_ENABLE : 0);
++    if (cs_changed) wr(s, SE_SPI_DEMUX_SEL, chip_select);
++    if (changed & GENI_SPI_CPHA) wr(s, SE_SPI_CPHA, (mode & GENI_SPI_CPHA) ? GENI_CPHA_BIT : 0);
++    if (changed & GENI_SPI_CPOL) wr(s, SE_SPI_CPOL, (mode & GENI_SPI_CPOL) ? GENI_CPOL_BIT : 0);
++    if ((changed & GENI_SPI_CS_HIGH) || (cs_changed && (mode & GENI_SPI_CS_HIGH)))
++        wr(s, SE_SPI_DEMUX_OUTPUT_INV, (mode & GENI_SPI_CS_HIGH) ? (1u << chip_select) : 0);
++    return 0;
++}
++
++int geni_spi_set_clock(struct geni_spi *s, unsigned speed_hz, unsigned sclk_hz, unsigned clk_sel) {
++    if (!speed_hz || !sclk_hz || clk_sel > 7 || !s->oversampling) return GENI_ERR_PARAM;
++    unsigned long long denom = (unsigned long long)s->oversampling * speed_hz;
++    unsigned long long div = (sclk_hz + denom - 1) / denom;
++    if (div == 0 || div > GENI_CLK_DIV_MAX) return GENI_ERR_PARAM;
++    wr(s, SE_GENI_CLK_SEL, clk_sel);
++    wr(s, GENI_SER_M_CLK_CFG, ((uint32_t)div << GENI_CLK_DIV_SHIFT) | GENI_SER_CLK_EN);
++    s->cur_speed_hz = speed_hz;
++    return 0;
++}
++
++struct xfer {
++    const uint8_t *tx;
++    uint8_t *rx;
++    size_t tx_rem, rx_rem, len;
++};
++
++static int handle_tx(struct geni_spi *s, struct xfer *x) {
++    unsigned bpw = bytes_per_word(s);
++    size_t max = (size_t)(s->info.tx_fifo_depth - s->tx_wm) * bpw;
++    if (x->tx_rem < max) max = x->tx_rem;
++    const uint8_t *p = x->tx + (x->len - x->tx_rem);
++    size_t i = 0;
++    while (i < max) {
++        uint32_t word = 0;
++        size_t n = max - i < bpw ? max - i : bpw;
++        for (size_t j = 0; j < n; j++) word |= (uint32_t)p[i++] << (8 * j);
++        wr(s, SE_GENI_TX_FIFOn, word);
++    }
++    x->tx_rem -= max;
++    if (!x->tx_rem) {
++        wr(s, SE_GENI_TX_WATERMARK_REG, 0);
++        return 0;
++    }
++    return 1;
++}
++
++static void handle_rx(struct geni_spi *s, struct xfer *x) {
++    unsigned bpw = bytes_per_word(s);
++    uint32_t st = rd(s, SE_GENI_RX_FIFO_STATUS);
++    size_t bytes = (size_t)(st & GENI_RX_WC_MASK) * bpw;
++    if (st & GENI_RX_LAST) {
++        unsigned valid = (st >> GENI_RX_LAST_VALID_SHIFT) & GENI_RX_LAST_VALID_MASK;
++        if (valid && valid < 4) bytes -= bpw - valid;
++    }
++    if (!x->rx) {
++        for (size_t i = 0; i < (bytes + bpw - 1) / bpw; i++) (void)rd(s, SE_GENI_RX_FIFOn);
++        return;
++    }
++    if (x->rx_rem < bytes) bytes = x->rx_rem;
++    uint8_t *p = x->rx + (x->len - x->rx_rem);
++    size_t i = 0;
++    while (i < bytes) {
++        uint32_t word = rd(s, SE_GENI_RX_FIFOn);
++        size_t n = bytes - i < bpw ? bytes - i : bpw;
++        for (size_t j = 0; j < n; j++) p[i++] = (uint8_t)(word >> (8 * j));
++    }
++    x->rx_rem -= bytes;
++}
++
++static int wait_bit(struct geni_spi *s, uint32_t bit) {
++    for (unsigned n = 0; n < s->poll_limit; n++) {
++        uint32_t st = rd(s, SE_GENI_M_IRQ_STATUS);
++        if (st & bit) {
++            wr(s, SE_GENI_M_IRQ_CLEAR, st);
++            return 0;
++        }
++        if (s->se.delay_us) s->se.delay_us(s->se.ctx, 1);
++    }
++    return GENI_ERR_TIMEOUT;
++}
++
++static void recover(struct geni_spi *s) {
++    wr(s, SE_GENI_TX_WATERMARK_REG, 0);
++    wr(s, SE_GENI_M_CMD_CTRL_REG, GENI_M_CMD_CANCEL);
++    if (wait_bit(s, GENI_M_CMD_CANCEL_DONE | GENI_M_CMD_DONE) == 0) return;
++    wr(s, SE_GENI_M_CMD_CTRL_REG, GENI_M_CMD_ABORT);
++    (void)wait_bit(s, GENI_M_CMD_ABORT_DONE | GENI_M_CMD_DONE);
++}
++
++static int transfer_dma(struct geni_spi *s, const uint8_t *tx, uint8_t *rx, size_t len, int keep_cs) {
++    struct geni_dma *d = &s->dma;
++    if (len > d->size) return GENI_ERR_PARAM;
++    uint32_t cmd = 0;
++    if (tx) {
++        volatile uint8_t *tv = d->tx_virt;   // volatile: the buffer may be an uncached device-type mapping, so no merged stores
++        for (size_t i = 0; i < len; i++) tv[i] = tx[i];
++        if (d->clean) d->clean(d->ctx, d->tx_virt, len);
++        cmd |= GENI_M_CMD_TX_ONLY;
++        wr(s, SE_SPI_TX_TRANS_LEN, (uint32_t)len);
++    }
++    if (rx) {
++        volatile uint8_t *rv0 = d->rx_virt;
++        for (size_t i = 0; i < len; i++) rv0[i] = 0x5a;   // canary: bytes the engine never wrote stay recognisable
++        if (d->clean_inval) d->clean_inval(d->ctx, d->rx_virt, len);
++        cmd |= GENI_M_CMD_RX_ONLY;
++        wr(s, SE_SPI_RX_TRANS_LEN, (uint32_t)len);
++    }
++    if (cmd == (GENI_M_CMD_TX_ONLY | GENI_M_CMD_RX_ONLY)) cmd = GENI_M_CMD_TX_RX;
++    wr(s, SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
++    wr(s, SE_DMA_TX_IRQ_CLR, 0xffffffffu);
++    wr(s, SE_DMA_RX_IRQ_CLR, 0xffffffffu);
++    wr(s, SE_GENI_M_CMD0, (cmd << GENI_M_OPCODE_SHIFT) | (keep_cs ? GENI_M_PARAM_FRAGMENTATION : 0));
++    // geni_se_rx_init_dma / geni_se_tx_init_dma: the LEN write starts each direction.
++    if (rx) {
++        wr(s, SE_DMA_RX_IRQ_EN_SET, GENI_DMA_DONE | GENI_DMA_EOT | GENI_DMA_AHB_ERR);
++        wr(s, SE_DMA_RX_PTR_L, (uint32_t)d->rx_phys);
++        wr(s, SE_DMA_RX_PTR_H, (uint32_t)(d->rx_phys >> 32));
++        wr(s, SE_DMA_RX_ATTR, 0);
++        wr(s, SE_DMA_RX_LEN, (uint32_t)len);
++    }
++    if (tx) {
++        wr(s, SE_DMA_TX_IRQ_EN_SET, GENI_DMA_DONE | GENI_DMA_EOT | GENI_DMA_AHB_ERR);
++        wr(s, SE_DMA_TX_PTR_L, (uint32_t)d->tx_phys);
++        wr(s, SE_DMA_TX_PTR_H, (uint32_t)(d->tx_phys >> 32));
++        wr(s, SE_DMA_TX_ATTR, GENI_DMA_TX_ATTR_EOT_BUF);
++        wr(s, SE_DMA_TX_LEN, (uint32_t)len);
++    }
++    int tx_done = !tx, rx_done = !rx, status = GENI_ERR_TIMEOUT;
++    for (unsigned n = 0; n < s->poll_limit; n++) {
++        uint32_t ts = tx ? rd(s, SE_DMA_TX_IRQ_STAT) : 0, rs = rx ? rd(s, SE_DMA_RX_IRQ_STAT) : 0;
++        uint32_t ms = rd(s, SE_GENI_M_IRQ_STATUS);
++        if (ts) wr(s, SE_DMA_TX_IRQ_CLR, ts);
++        if (rs) wr(s, SE_DMA_RX_IRQ_CLR, rs);
++        if (ms) wr(s, SE_GENI_M_IRQ_CLEAR, ms);
++        if ((ts & GENI_DMA_AHB_ERR) || (rs & GENI_DMA_AHB_ERR) || (ms & GENI_M_ERRORS)) { status = GENI_ERR_IO; break; }
++        if (ts & GENI_DMA_DONE) tx_done = 1;
++        if (rs & GENI_DMA_DONE) rx_done = 1;
++        if (tx_done && rx_done) { status = 0; break; }
++        if (s->se.delay_us) s->se.delay_us(s->se.ctx, 1);
++    }
++    s->last_tx_in = tx ? rd(s, SE_DMA_TX_LEN_IN) : 0;
++    s->last_rx_in = rx ? rd(s, SE_DMA_RX_LEN_IN) : 0;
++    if (status == 0) {
++        if (rx) {
++            if (d->inval) d->inval(d->ctx, d->rx_virt, len);
++            volatile uint8_t *rv = d->rx_virt;
++            for (size_t i = 0; i < len; i++) rx[i] = rv[i];
++        }
++        return 0;
++    }
++    s->snap_dma_tx = rd(s, SE_DMA_TX_IRQ_STAT);
++    s->snap_dma_rx = rd(s, SE_DMA_RX_IRQ_STAT);
++    s->snap_dma_txin = rd(s, SE_DMA_TX_LEN_IN);
++    s->snap_dma_rxin = rd(s, SE_DMA_RX_LEN_IN);
++    s->snap_irq = rd(s, SE_GENI_M_IRQ_STATUS);
++    s->snap_status = rd(s, SE_GENI_STATUS);
++    s->snap_txfs = rd(s, SE_GENI_TX_FIFO_STATUS);
++    s->snap_rxfs = rd(s, SE_GENI_RX_FIFO_STATUS);
++    s->snap_valid = 1;
++    recover(s);
++    wr(s, SE_DMA_TX_FSM_RST, 1);
++    wr(s, SE_DMA_RX_FSM_RST, 1);
++    return status;
++}
++
++int geni_spi_transfer(struct geni_spi *s, const uint8_t *tx, uint8_t *rx, size_t len, int keep_cs) {
++    if (!s || !len || len > GENI_TRANS_LEN_MASK || (!tx && !rx) || !s->cur_speed_hz) return GENI_ERR_PARAM;
++    if (s->cur_bpw != 8) {
++        set_word_len(s, 8, !(s->last_mode & GENI_SPI_LSB_FIRST));
++        s->cur_bpw = 8;
++    }
++    if (s->use_dma) return transfer_dma(s, tx, rx, len, keep_cs);
++    struct xfer x = {tx, rx, tx ? len : 0, rx ? len : 0, len};
++    uint32_t cmd = 0;
++    if (tx) {
++        cmd |= GENI_M_CMD_TX_ONLY;
++        wr(s, SE_SPI_TX_TRANS_LEN, (uint32_t)len);
++    }
++    if (rx) {
++        cmd |= GENI_M_CMD_RX_ONLY;
++        wr(s, SE_SPI_RX_TRANS_LEN, (uint32_t)len);
++    }
++    if (cmd == (GENI_M_CMD_TX_ONLY | GENI_M_CMD_RX_ONLY)) cmd = GENI_M_CMD_TX_RX;
++    wr(s, SE_GENI_M_IRQ_CLEAR, 0xffffffffu);
++    wr(s, SE_GENI_M_CMD0, (cmd << GENI_M_OPCODE_SHIFT) | (keep_cs ? GENI_M_PARAM_FRAGMENTATION : 0));
++    if (tx && handle_tx(s, &x)) wr(s, SE_GENI_TX_WATERMARK_REG, s->tx_wm);
++    int status = GENI_ERR_TIMEOUT;
++    for (unsigned n = 0; n < s->poll_limit; n++) {
++        uint32_t st = rd(s, SE_GENI_M_IRQ_STATUS);
++        if (!st) {
++            if (s->se.delay_us) s->se.delay_us(s->se.ctx, 1);
++            continue;
++        }
++        wr(s, SE_GENI_M_IRQ_CLEAR, st);
++        if (st & GENI_M_ERRORS) {
++            status = GENI_ERR_IO;
++            break;
++        }
++        if (st & (GENI_M_RX_FIFO_WATERMARK | GENI_M_RX_FIFO_LAST)) handle_rx(s, &x);
++        if ((st & GENI_M_TX_FIFO_WATERMARK) && tx) handle_tx(s, &x);
++        if (st & GENI_M_CMD_DONE) {
++            if (rx && x.rx_rem) handle_rx(s, &x);
++            status = (x.tx_rem || x.rx_rem) ? GENI_ERR_IO : 0;
++            if (x.tx_rem) wr(s, SE_GENI_TX_WATERMARK_REG, 0);
++            return status;
++        }
++    }
++    s->snap_dma_tx = rd(s, SE_DMA_TX_IRQ_STAT);
++    s->snap_dma_rx = rd(s, SE_DMA_RX_IRQ_STAT);
++    s->snap_dma_txin = rd(s, SE_DMA_TX_LEN_IN);
++    s->snap_dma_rxin = rd(s, SE_DMA_RX_LEN_IN);
++    s->snap_irq = rd(s, SE_GENI_M_IRQ_STATUS);
++    s->snap_status = rd(s, SE_GENI_STATUS);
++    s->snap_txfs = rd(s, SE_GENI_TX_FIFO_STATUS);
++    s->snap_rxfs = rd(s, SE_GENI_RX_FIFO_STATUS);
++    s->snap_valid = 1;
++    recover(s);
++    return status;
++}
+diff --git a/bsd/dev/nabu_geni_spi.h b/bsd/dev/nabu_geni_spi.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/nabu_geni_spi.h
+@@ -0,0 +1,223 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++// Qualcomm GENI serial-engine SPI master, FIFO (PIO) mode. Register layout and sequences follow the study of the
++// Linux spi-geni-qcom / qcom-geni-se drivers (no code copied). No board addresses, clocks or pins here.
++#ifndef GENI_SPI_H
++#define GENI_SPI_H
++#include <stdint.h>
++#include <stddef.h>
++
++// Serial-engine registers (offsets from the SE base).
++#define GENI_FORCE_DEFAULT_REG 0x20
++#define GENI_OUTPUT_CTRL 0x24
++#define SE_GENI_CGC_CTRL 0x28
++#define SE_GENI_STATUS 0x40
++#define GENI_SER_M_CLK_CFG 0x48
++#define GENI_IF_DISABLE_RO 0x64
++#define GENI_FW_REVISION_RO 0x68
++#define SE_GENI_CLK_SEL 0x7c
++#define SE_GENI_BYTE_GRAN 0x254
++#define SE_GENI_DMA_MODE_EN 0x258
++#define SE_GENI_TX_PACKING_CFG0 0x260
++#define SE_GENI_TX_PACKING_CFG1 0x264
++#define SE_GENI_RX_PACKING_CFG0 0x284
++#define SE_GENI_RX_PACKING_CFG1 0x288
++#define SE_SPI_CPHA 0x224
++#define SE_SPI_LOOPBACK 0x22c
++#define SE_SPI_CPOL 0x230
++#define SE_SPI_DEMUX_OUTPUT_INV 0x24c
++#define SE_SPI_DEMUX_SEL 0x250
++#define SE_SPI_TRANS_CFG 0x25c
++#define SE_SPI_WORD_LEN 0x268
++#define SE_SPI_TX_TRANS_LEN 0x26c
++#define SE_SPI_RX_TRANS_LEN 0x270
++#define SE_GENI_M_CMD0 0x600
++#define SE_GENI_M_CMD_CTRL_REG 0x604
++#define SE_GENI_M_IRQ_STATUS 0x610
++#define SE_GENI_M_IRQ_EN 0x614
++#define SE_GENI_M_IRQ_CLEAR 0x618
++#define SE_GENI_S_IRQ_EN 0x644
++#define SE_GENI_S_IRQ_CLEAR 0x648
++#define SE_DMA_TX_IRQ_CLR 0xc44
++#define SE_DMA_RX_IRQ_CLR 0xd44
++#define SE_GENI_TX_FIFOn 0x700
++#define SE_GENI_RX_FIFOn 0x780
++#define SE_GENI_TX_FIFO_STATUS 0x800
++#define SE_GENI_RX_FIFO_STATUS 0x804
++#define SE_GENI_TX_WATERMARK_REG 0x80c
++#define SE_GENI_RX_WATERMARK_REG 0x810
++#define SE_GENI_RX_RFR_WATERMARK_REG 0x814
++#define SE_IRQ_EN 0xe1c
++#define SE_HW_PARAM_0 0xe24
++#define SE_DMA_GENERAL_CFG 0xe30
++#define SE_GSI_EVENT_EN 0xe18
++// Serial-engine DMA registers (qcom-geni-se.c / geni-se.h of the pinned mainline tree).
++#define SE_DMA_TX_PTR_L 0xc30
++#define SE_DMA_TX_PTR_H 0xc34
++#define SE_DMA_TX_ATTR 0xc38
++#define SE_DMA_TX_LEN 0xc3c
++#define SE_DMA_TX_IRQ_STAT 0xc40
++#define SE_DMA_TX_IRQ_EN_SET 0xc4c
++#define SE_DMA_TX_LEN_IN 0xc54
++#define SE_DMA_TX_FSM_RST 0xc58
++#define SE_DMA_RX_PTR_L 0xd30
++#define SE_DMA_RX_PTR_H 0xd34
++#define SE_DMA_RX_ATTR 0xd38
++#define SE_DMA_RX_LEN 0xd3c
++#define SE_DMA_RX_IRQ_STAT 0xd40
++#define SE_DMA_RX_IRQ_EN_SET 0xd4c
++#define SE_DMA_RX_LEN_IN 0xd54
++#define SE_DMA_RX_FSM_RST 0xd58
++// SE_DMA_{TX,RX}_IRQ_STAT / _EN_SET fields
++#define GENI_DMA_DONE (1u<<0)
++#define GENI_DMA_EOT (1u<<1)
++#define GENI_DMA_AHB_ERR (1u<<2)        // TX_SBE / RX_SBE
++#define GENI_DMA_RESET_DONE (1u<<3)
++#define GENI_DMA_TX_ATTR_EOT_BUF (1u<<0)
++// Wrapper register (offset from the QUP wrapper base).
++#define QUPV3_HW_VER_REG 0x4
++
++#define GENI_PROTO_NONE 0
++#define GENI_PROTO_SPI 1
++#define GENI_PROTO_INVALID 255
++
++#define GENI_M_CMD_TX_ONLY 1
++#define GENI_M_CMD_RX_ONLY 2
++#define GENI_M_CMD_TX_RX 3              // full duplex: spi-geni-qcom.c issues SPI_TX_ONLY|SPI_RX_ONLY (its SPI_TX_RX=7 is never used)
++#define GENI_M_PARAM_FRAGMENTATION (1u<<2)
++
++// Register field values.
++#define GENI_FORCE_DEFAULT (1u<<0)
++#define GENI_SER_CLK_EN (1u<<0)
++#define GENI_CLK_DIV_SHIFT 4
++#define GENI_CLK_DIV_MAX 0xfffu
++#define GENI_FIFO_IF_DISABLE (1u<<0)
++#define GENI_FW_PROTO_SHIFT 8
++#define GENI_DMA_MODE_EN (1u<<0)
++#define GENI_DEFAULT_CGC_EN 0x7fu
++#define GENI_DEFAULT_IO_OUTPUT_CTRL 0x7fu
++#define GENI_M_OPCODE_SHIFT 27
++#define GENI_M_PARAMS_MASK 0x7ffffffu
++#define GENI_M_CMD_CANCEL (1u<<2)
++#define GENI_M_CMD_ABORT (1u<<1)
++#define GENI_STATUS_M_ACTIVE (1u<<0)
++#define GENI_TRANS_LEN_MASK 0xffffffu
++#define GENI_WORD_LEN_MIN 4
++#define GENI_CS_TOGGLE (1u<<1)
++#define GENI_CPHA_BIT (1u<<0)
++#define GENI_CPOL_BIT (1u<<2)
++#define GENI_LOOPBACK_ENABLE 1u
++// SE_IRQ_EN
++#define GENI_IRQ_DMA_RX (1u<<0)
++#define GENI_IRQ_DMA_TX (1u<<1)
++#define GENI_IRQ_M (1u<<2)
++#define GENI_IRQ_S (1u<<3)
++// SE_DMA_GENERAL_CFG
++#define GENI_DMA_RX_CGC_ON (1u<<0)
++#define GENI_DMA_TX_CGC_ON (1u<<1)
++#define GENI_DMA_AHB_SLV_CGC_ON (1u<<2)
++#define GENI_AHB_SEC_SLV_CGC_ON (1u<<3)
++// M_IRQ bits
++#define GENI_M_CMD_DONE (1u<<0)
++#define GENI_M_CMD_OVERRUN (1u<<1)
++#define GENI_M_ILLEGAL_CMD (1u<<2)
++#define GENI_M_CMD_FAILURE (1u<<3)
++#define GENI_M_CMD_CANCEL_DONE (1u<<4)
++#define GENI_M_CMD_ABORT_DONE (1u<<5)
++#define GENI_M_IO_DATA_DEASSERT (1u<<22)
++#define GENI_M_IO_DATA_ASSERT (1u<<23)
++#define GENI_M_RX_FIFO_RD_ERR (1u<<24)
++#define GENI_M_RX_FIFO_WR_ERR (1u<<25)
++#define GENI_M_RX_FIFO_WATERMARK (1u<<26)
++#define GENI_M_RX_FIFO_LAST (1u<<27)
++#define GENI_M_TX_FIFO_RD_ERR (1u<<28)
++#define GENI_M_TX_FIFO_WR_ERR (1u<<29)
++#define GENI_M_TX_FIFO_WATERMARK (1u<<30)
++#define GENI_M_COMMON_IRQ_EN (0x7eu | GENI_M_IO_DATA_DEASSERT | GENI_M_IO_DATA_ASSERT | GENI_M_RX_FIFO_RD_ERR | \
++                              GENI_M_RX_FIFO_WR_ERR | GENI_M_TX_FIFO_RD_ERR | GENI_M_TX_FIFO_WR_ERR)
++#define GENI_S_COMMON_IRQ_EN (0x3eu | 0x3e00u | (1u<<24) | (1u<<25))
++#define GENI_M_ERRORS (GENI_M_CMD_OVERRUN | GENI_M_ILLEGAL_CMD | GENI_M_CMD_FAILURE | GENI_M_RX_FIFO_RD_ERR | \
++                       GENI_M_RX_FIFO_WR_ERR | GENI_M_TX_FIFO_RD_ERR | GENI_M_TX_FIFO_WR_ERR)
++// RX_FIFO_STATUS
++#define GENI_RX_LAST (1u<<31)
++#define GENI_RX_LAST_VALID_SHIFT 28
++#define GENI_RX_LAST_VALID_MASK 7u
++#define GENI_RX_WC_MASK 0x1ffffffu
++// Packing vector fields
++#define GENI_PACK_START_SHIFT 5
++#define GENI_PACK_DIR_SHIFT 4
++#define GENI_PACK_LEN_SHIFT 1
++#define GENI_PACK_STOP (1u<<0)
++#define GENI_PACK_VECTOR_SHIFT 10
++#define GENI_PACK_VECTORS 4
++
++#define GENI_SPI_CPHA 0x01
++#define GENI_SPI_CPOL 0x02
++#define GENI_SPI_CS_HIGH 0x04
++#define GENI_SPI_LSB_FIRST 0x08
++#define GENI_SPI_LOOP 0x20
++
++#define GENI_ERR_PARAM (-22)
++#define GENI_ERR_PROTO (-71)
++#define GENI_ERR_NODEV (-19)
++#define GENI_ERR_TIMEOUT (-110)
++#define GENI_ERR_IO (-5)
++#define GENI_ERR_NOTSUP (-95)
++
++struct geni_io {
++    void *ctx;
++    uint32_t (*rd)(void *ctx, uint32_t reg);
++    void (*wr)(void *ctx, uint32_t reg, uint32_t value);
++    void (*delay_us)(void *ctx, unsigned us);
++};
++
++struct geni_spi_info {
++    uint32_t fw_revision, protocol, if_disable, hw_param0, geni_status;
++    uint32_t qup_hw_version;
++    unsigned tx_fifo_depth, fifo_width_bits;
++    int fifo_disabled;
++};
++
++struct geni_spi {
++    struct geni_io se;                  // serial engine registers
++    struct geni_io wrapper;             // QUP wrapper registers (hardware version only)
++    struct geni_spi_info info;
++    unsigned oversampling, tx_wm;
++    unsigned cur_bpw;
++    unsigned cur_speed_hz;
++    uint32_t last_mode;
++    int last_cs;
++    unsigned poll_limit;                // iterations of the completion poll before cancel/abort
++    int poll_only;                      // 1: switch the engine interrupt outputs off after init (completion polled); 2: leave them on
++    uint32_t snap_irq, snap_status, snap_txfs, snap_rxfs;  // registers read just before a timed-out transfer is cancelled
++    uint32_t snap_dma_tx, snap_dma_rx, snap_dma_txin, snap_dma_rxin;
++    int snap_valid;
++    uint32_t last_tx_in, last_rx_in;                  // SE_DMA_{TX,RX}_LEN_IN after the latest DMA transfer: bytes the engine moved
++    // SE DMA mode (for engines whose FIFO interface is disabled and that cannot be re-enabled from the host): transfers go
++    // through two caller-provided buffers that the serial engine's DMA master can reach at tx_phys/rx_phys. The caller owns
++    // the translation (SMMU) and cache policy; the callbacks maintain the CPU caches around each transfer.
++    int use_dma;
++    struct geni_dma {
++        void *ctx;
++        void (*clean)(void *ctx, void *virt, size_t len);        // write back CPU-dirty lines before the engine reads
++        void (*clean_inval)(void *ctx, void *virt, size_t len);  // write back and drop before the engine writes
++        void (*inval)(void *ctx, void *virt, size_t len);        // drop stale lines after the engine wrote
++        uint8_t *tx_virt, *rx_virt;
++        uint64_t tx_phys, rx_phys;
++        size_t size;
++    } dma;
++    int allow_fifo_disabled;            // try FIFO mode even when FIFO_IF_DISABLE is set (the Linux fallback when no GPI channel exists)
++};
++
++// Read-only: protocol, FIFO geometry, FIFO-disable flag, version. Safe to run before any register write; only valid when
++// the SE clocks are already running (the caller must know that).
++int geni_spi_read_info(struct geni_spi *s);
++// Select FIFO mode and program the controller defaults. Refuses engines that are not configured for SPI or whose FIFO
++// interface is disabled (those need the GPI DMA path, which this driver does not implement).
++int geni_spi_init(struct geni_spi *s);
++int geni_spi_setup(struct geni_spi *s, unsigned mode, unsigned chip_select);
++// Program the serial clock: divider from the SE source clock (sclk_hz) and the requested rate; clk_sel is the source index.
++int geni_spi_set_clock(struct geni_spi *s, unsigned speed_hz, unsigned sclk_hz, unsigned clk_sel);
++// With use_dma set the transfer runs through the SE DMA engine.
++// One full-duplex (rx!=NULL, tx!=NULL), TX-only or RX-only transfer of len bytes (8 bits per word), polled.
++int geni_spi_transfer(struct geni_spi *s, const uint8_t *tx, uint8_t *rx, size_t len, int keep_cs);
++#endif
+diff --git a/bsd/dev/nabu_nt36523.c b/bsd/dev/nabu_nt36523.c
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/nabu_nt36523.c
+@@ -0,0 +1,201 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++#include "nabu_nt36523.h"
++
++#include <sys/systm.h>
++
++static int
++nvt_xfer(const struct nvt_bus *bus, const uint8_t *tx, uint8_t *rx, size_t len)
++{
++	if (bus == NULL || bus->xfer == NULL || len == 0) {
++		return -1;
++	}
++	return bus->xfer(bus->ctx, tx, rx, len) == 0 ? 0 : -1;
++}
++
++int
++nvt_set_page(const struct nvt_bus *bus, uint32_t addr)
++{
++	uint8_t tx[3] = { 0xff, (uint8_t)(addr >> 15), (uint8_t)(addr >> 7) };
++	return nvt_xfer(bus, tx, NULL, sizeof(tx));
++}
++
++int
++nvt_write_addr(const struct nvt_bus *bus, uint32_t addr, const uint8_t *data, size_t len)
++{
++	if (data == NULL || len == 0 || len > 256) {
++		return -1;
++	}
++	if (nvt_set_page(bus, addr) != 0) {
++		return -1;
++	}
++	uint8_t tx[257];
++	tx[0] = (uint8_t)((addr & 0x7f) | 0x80);
++	memcpy(tx + 1, data, len);
++	return nvt_xfer(bus, tx, NULL, len + 1);
++}
++
++int
++nvt_read_addr(const struct nvt_bus *bus, uint32_t addr, uint8_t *out, size_t len)
++{
++	if (out == NULL || len == 0 || len > 8192) {
++		return -1;
++	}
++	if (nvt_set_page(bus, addr) != 0) {
++		return -1;
++	}
++	uint8_t tx[8194];
++	uint8_t rx[8194];
++	memset(tx, 0, len + 2);
++	tx[0] = (uint8_t)(addr & 0x7f);
++	if (nvt_xfer(bus, tx, rx, len + 2) != 0) {
++		return -1;
++	}
++	memcpy(out, rx + 2, len);
++	return 0;
++}
++
++int
++nvt_read_trim_id(const struct nvt_bus *bus, uint32_t addr, uint8_t id[6])
++{
++	return nvt_read_addr(bus, addr, id, 6);
++}
++
++int
++nvt_read_point_frame(const struct nvt_bus *bus, uint8_t frame[NVT_POINT_DATA_LEN])
++{
++	if (frame == NULL || nvt_set_page(bus, NVT_EVENT_BUF_ADDR) != 0) {
++		return -1;
++	}
++	uint8_t tx[NVT_POINT_DATA_LEN + 2];
++	uint8_t rx[NVT_POINT_DATA_LEN + 2];
++	memset(tx, 0, sizeof(tx));
++	if (nvt_xfer(bus, tx, rx, sizeof(tx)) != 0) {
++		return -1;
++	}
++	memcpy(frame, rx + 2, NVT_POINT_DATA_LEN);
++	return 0;
++}
++
++int
++nvt_parse_points(const uint8_t frame[NVT_POINT_DATA_LEN], uint16_t max_x,
++    uint16_t max_y, struct nvt_contact *out, int max)
++{
++	if (frame == NULL || out == NULL || max <= 0) {
++		return -1;
++	}
++	if (max_x == 0) {
++		max_x = NVT_DEFAULT_MAX_X;
++	}
++	if (max_y == 0) {
++		max_y = NVT_DEFAULT_MAX_Y;
++	}
++
++	int count = 0;
++	for (int i = 0; i < NVT_MAX_FINGERS && count < max; i++) {
++		const uint8_t *p = frame + 6 * i;
++		unsigned raw = p[0];
++		unsigned id = raw >> 3;
++		unsigned event = raw & 7u;
++
++		if (id == 0 || id > NVT_MAX_FINGERS) {
++			continue;
++		}
++		/* 1 = enter, 2 = moving.  0/3+ are releases or invalid. */
++		if (event != 1 && event != 2) {
++			continue;
++		}
++
++		unsigned x = ((unsigned)p[1] << 4) | (p[3] >> 4);
++		unsigned y = ((unsigned)p[2] << 4) | (p[3] & 0x0fu);
++		if (x > max_x || y > max_y) {
++			continue;
++		}
++
++		unsigned weight = p[4] ? p[4] : 1;
++		unsigned pressure = p[5];
++		if (i < 2) {
++			/* The vendor packs the high pressure bits of the first two
++			 * fingers in point_data[63] and [64]; frame[] starts at
++			 * point_data[1], so those are frame[62] and frame[63]. */
++			pressure |= (unsigned)frame[62 + i] << 8;
++		}
++		if (pressure == 0) {
++			pressure = 1;
++		}
++
++		out[count].id = (int)id;
++		out[count].down = 1;
++		out[count].x = (int)x;
++		out[count].y = (int)y;
++		out[count].weight = (int)weight;
++		out[count].pressure = (int)pressure;
++		count++;
++	}
++	return count;
++}
++
++int
++nvt_parse_fwinfo(const uint8_t *data, size_t len, struct nvt_info *info)
++{
++	if (data == NULL || info == NULL || len < 39) {
++		return -1;
++	}
++	memset(info, 0, sizeof(*info));
++
++	uint8_t fw_ver = data[0];
++	uint8_t fw_inv = data[1];
++	uint16_t max_x = ((uint16_t)data[4] << 8) | data[5];
++	uint16_t max_y = ((uint16_t)data[6] << 8) | data[7];
++
++	info->fw_ver = fw_ver;
++	info->fw_type = data[13];
++	info->x_num = data[2];
++	info->y_num = data[3];
++	info->max_buttons = data[10];
++	info->cascade = data[33] & 1;
++
++	int good = ((unsigned)fw_ver + fw_inv) == 0xffu &&
++	    max_x > 0 && max_y > 0 && max_x <= 4096 && max_y <= 4096;
++	if (!good) {
++		info->max_x = NVT_DEFAULT_MAX_X;
++		info->max_y = NVT_DEFAULT_MAX_Y;
++		info->valid = 0;
++		return 0;
++	}
++	info->max_x = max_x;
++	info->max_y = max_y;
++	info->valid = 1;
++	return 0;
++}
++
++int
++nvt_match_nt36523(const uint8_t id[6])
++{
++	static const struct {
++		uint8_t id[6];
++		uint8_t mask[6];
++	} table[] = {
++		{ { 0x20, 0xff, 0xff, 0x23, 0x65, 0x03 }, { 1, 0, 0, 1, 1, 1 } },
++		{ { 0x0c, 0xff, 0xff, 0x23, 0x65, 0x03 }, { 1, 0, 0, 1, 1, 1 } },
++		{ { 0x0b, 0xff, 0xff, 0x23, 0x65, 0x03 }, { 1, 0, 0, 1, 1, 1 } },
++		{ { 0x0a, 0xff, 0xff, 0x23, 0x65, 0x03 }, { 1, 0, 0, 1, 1, 1 } },
++		{ { 0xff, 0xff, 0xff, 0x23, 0x65, 0x03 }, { 0, 0, 0, 1, 1, 1 } },
++	};
++
++	if (id == NULL) {
++		return 0;
++	}
++	for (size_t t = 0; t < sizeof(table) / sizeof(table[0]); t++) {
++		int match = 1;
++		for (size_t i = 0; i < 6; i++) {
++			if (table[t].mask[i] && id[i] != table[t].id[i]) {
++				match = 0;
++				break;
++			}
++		}
++		if (match) {
++			return 1;
++		}
++	}
++	return 0;
++}
+diff --git a/bsd/dev/nabu_nt36523.h b/bsd/dev/nabu_nt36523.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/dev/nabu_nt36523.h
+@@ -0,0 +1,78 @@
++/*
++ * Novatek NT36523 protocol helpers for nabu.
++ *
++ * Clean-room implementation from the protocol facts used by the nabu vendor
++ * driver (nt36xxx.c / nt36xxx_mem_map.h).  No kernel dependencies; the bus is
++ * supplied by the caller so the same code can run in host tests and in XNU.
++ *
++ * SPDX-License-Identifier: BSD-2-Clause-Patent
++ */
++#ifndef NABU_NT36523_H
++#define NABU_NT36523_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#define NVT_POINT_DATA_LEN   65
++#define NVT_MAX_FINGERS      10
++#define NVT_DEFAULT_MAX_X    1600
++#define NVT_DEFAULT_MAX_Y    2560
++
++#define NVT_CHIP_VER_TRIM_ADDR      0x3F004u
++#define NVT_CHIP_VER_TRIM_OLD_ADDR  0x1F64Eu
++#define NVT_EVENT_BUF_ADDR          0x2FE00u
++#define NVT_EVENT_FWINFO            0x78u
++#define NVT_EVENT_BUF_FWINFO        (NVT_EVENT_BUF_ADDR | NVT_EVENT_FWINFO)
++
++/* Full-duplex SPI transfer, chip select held for the whole transfer. */
++struct nvt_bus {
++	void *ctx;
++	int (*xfer)(void *ctx, const uint8_t *tx, uint8_t *rx, size_t len);
++	void (*delay_ms)(void *ctx, unsigned ms);
++};
++
++struct nvt_contact {
++	int id;          /* 1..NVT_MAX_FINGERS */
++	int down;        /* 1 = down/moving, 0 = release */
++	int x;
++	int y;
++	int weight;      /* touch major */
++	int pressure;
++};
++
++struct nvt_info {
++	uint8_t fw_ver;
++	uint8_t fw_type;
++	uint8_t x_num;
++	uint8_t y_num;
++	uint16_t max_x;
++	uint16_t max_y;
++	uint8_t max_buttons;
++	int cascade;
++	int valid;       /* fw info consistency check passed */
++};
++
++/* Page/address access, matching the vendor SPI framing. */
++int nvt_set_page(const struct nvt_bus *bus, uint32_t addr);
++int nvt_read_addr(const struct nvt_bus *bus, uint32_t addr, uint8_t *out, size_t len);
++int nvt_write_addr(const struct nvt_bus *bus, uint32_t addr, const uint8_t *data, size_t len);
++int nvt_read_trim_id(const struct nvt_bus *bus, uint32_t addr, uint8_t id[6]);
++
++/* Read one 65-byte point frame from the event buffer. */
++int nvt_read_point_frame(const struct nvt_bus *bus, uint8_t frame[NVT_POINT_DATA_LEN]);
++
++/*
++ * Parse a point frame into contacts.  Only id/event combinations 1 and 2 are
++ * reported as down; missing ids are the caller's release responsibility.
++ * Returns the number of contacts, or -1 on invalid arguments.
++ */
++int nvt_parse_points(const uint8_t frame[NVT_POINT_DATA_LEN],
++    uint16_t max_x, uint16_t max_y, struct nvt_contact *out, int max);
++
++/* Parse the 39-byte FWINFO block.  Falls back to 1600x2560 on broken data. */
++int nvt_parse_fwinfo(const uint8_t *data, size_t len, struct nvt_info *info);
++
++/* Match a 6-byte trim id against the NT36523 table. */
++int nvt_match_nt36523(const uint8_t id[6]);
++
++#endif /* NABU_NT36523_H */
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,8 @@
+ bsd/dev/nabu_sample.c			standard
+ bsd/dev/nabu_keys.c			standard
+ bsd/dev/nabu_touch.c			standard
++bsd/dev/nabu_geni_spi.c			standard
++bsd/dev/nabu_nt36523.c			standard
+ bsd/dev/nabu_rpmh.c			standard
+ bsd/dev/nabu_spmi.c			standard
+ bsd/dev/nabu_usb.c			standard
+diff --git a/iokit/Kernel/arm/NabuFramebuffer.cpp b/iokit/Kernel/arm/NabuFramebuffer.cpp
+--- a/iokit/Kernel/arm/NabuFramebuffer.cpp
++++ b/iokit/Kernel/arm/NabuFramebuffer.cpp
+@@ -115,6 +115,16 @@
+ 	bool          fDirty;
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
++	bool          fForceOn;       /* nabufb_force_on: ignore power-off */
++	bool          fDumpSwap;      /* nabufb_dump_swap: dump SwapEnd records */
++	bool          fProbeSurfaces; /* nabufb_probe_surfaces: repeat surface scan */
++	uint32_t      fProbeTicks;
++	uint32_t      fProbeCount;
++	bool          fFallback;      /* nabufb_fallback: present a probed BGRA surface */
++	bool          fStretch;       /* nabufb_stretch: fill the panel, no letterbox */
++	bool          fCrop;          /* nabufb_crop: fill the panel, crop the sides */
++	bool          fFallbackLogged;
++	uint32_t      fFallbackTicks;
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
+ 
+ 	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+@@ -122,6 +132,7 @@
+ 	void removeClient(IOMobileFramebufferUserClient *client);
+ 	void swap(const uint8_t *rec);
+ 	void present(const uint8_t *rec);
++	void present_fallback(void);
+ };
+ 
+ OSDefineMetaClassAndStructors(AppleCLCD, IOMobileFramebuffer);
+@@ -195,6 +206,39 @@
+ 	uint32_t hz = 10;
+ 	PE_parse_boot_argn("nabufb_hz", &hz, sizeof(hz));
+ 	fFlushTicks = (hz == 0 || hz >= 60) ? 1 : 60 / hz;
++	int force_on = 0;
++	PE_parse_boot_argn("nabufb_force_on", &force_on, sizeof(force_on));
++	fForceOn = force_on != 0;
++	int dump_swap = 0;
++	PE_parse_boot_argn("nabufb_dump_swap", &dump_swap, sizeof(dump_swap));
++	fDumpSwap = dump_swap != 0;
++	int probe_surfaces = 0;
++	PE_parse_boot_argn("nabufb_probe_surfaces", &probe_surfaces, sizeof(probe_surfaces));
++	fProbeSurfaces = probe_surfaces != 0;
++	fProbeTicks = 0;
++	fProbeCount = 0;
++	int fallback = 0;
++	PE_parse_boot_argn("nabufb_fallback", &fallback, sizeof(fallback));
++	fFallback = fallback != 0;
++	int stretch = 0;
++	PE_parse_boot_argn("nabufb_stretch", &stretch, sizeof(stretch));
++	fStretch = stretch != 0;
++	int crop = 0;
++	PE_parse_boot_argn("nabufb_crop", &crop, sizeof(crop));
++	fCrop = crop != 0;
++	fFallbackLogged = false;
++	fFallbackTicks = 0;
++	int console_off = 0;
++	PE_parse_boot_argn("nabufb_console_off", &console_off, sizeof(console_off));
++	int console_quiet = 0;
++	PE_parse_boot_argn("nabufb_noconsole", &console_quiet, sizeof(console_quiet));
++	if (console_off || console_quiet) {
++		/* Mute before the console can paint over the shim's boot logo.
++		 * The persistent ring logger and panic path remain active. */
++		nabu_console_muted = 1;
++		IOLog("NABU FB: console muted from start (off=%d quiet=%d)\n",
++		    console_off, console_quiet);
++	}
+ 	fVsync->setTimeoutUS(NABU_FB_VSYNC_US);
+ 
+ 	setProperty(kIOUserClientClassKey, "IOMobileFramebufferUserClient");
+@@ -203,6 +247,9 @@
+ 	registerService();
+ 	IOLog("NABU FB: AppleCLCD %ux%u stride %u at 0x%llx, default surface %u, presented as %ux%u\n",
+ 	    fWidth, fHeight, fRowBytes, fPhys, fSurface->id, fLogicalW, fLogicalH);
++	if (fForceOn) {
++		IOLog("NABU FB: nabufb_force_on=1, RequestPowerChange(0) will be ignored\n");
++	}
+ 	return true;
+ }
+ 
+@@ -212,6 +259,22 @@
+ 	AppleCLCD *fb = (AppleCLCD *)owner;
+ 	uint64_t now = mach_absolute_time();
+ 	uint64_t count = ++fb->fVsyncCount;
++
++	if (fb->fProbeSurfaces && ++fb->fProbeTicks >= 3600) {
++		fb->fProbeTicks = 0;
++		if (fb->fProbeCount < 4) {
++			fb->fProbeCount++;
++			nabu_surface_probe_all();
++		}
++	}
++	if (fb->fFallback && nabu_surface_bgra_hint_id() != 0) {
++		if ((++fb->fFallbackTicks % 6) == 0) {
++			IOLockLock(fb->fLock);
++			fb->fDirty = true;
++			IOLockUnlock(fb->fLock);
++		}
++	}
++
+ 	uint64_t values[6] = {
+ 		(uint32_t)count, (uint32_t)(count >> 32),
+ 		(uint32_t)now, (uint32_t)(now >> 32),
+@@ -303,8 +366,38 @@
+ 	memcpy(fPending, rec, NABU_FB_SWAP_REC_SIZE);
+ 	fDirty = true;
+ 	IOLockUnlock(fLock);
+-	if ((++nabu_fb_swap_count % 1000) == 0) {
+-		IOLog("NABU FB: %llu swaps\n", nabu_fb_swap_count);
++
++	uint64_t n = ++nabu_fb_swap_count;
++	if (fDumpSwap && n <= 2) {
++		IOLog("NABU FB: SwapEnd dump %llu (%u bytes, nonzero words)\n",
++		    n, NABU_FB_SWAP_REC_SIZE);
++		for (uint32_t off = 0; off + 4 <= NABU_FB_SWAP_REC_SIZE; off += 4) {
++			uint32_t v = get32(rec, off);
++			if (v != 0) {
++				IOLog("NABU FB:  [%03x] 0x%08x\n", off, v);
++			}
++		}
++	}
++	if (n <= 16) {
++		uint32_t mask = get32(rec, 0x104);
++		IOLog("NABU FB: SwapEnd %llu swap %u mask 0x%x\n", n,
++		    get32(rec, 0x50), mask);
++		for (uint32_t layer = 0; layer < NABU_FB_LAYERS; layer++) {
++			if (!(mask & (1u << layer))) {
++				continue;
++			}
++			const uint8_t *a = rec + 0x64 + 16 * layer;
++			const uint8_t *b = rec + 0xc4 + 16 * layer;
++			IOLog("NABU FB:  layer %u surface %u a %d,%d %ux%u b %d,%d %dx%d\n",
++			    layer, get32(rec, 0x54 + 4 * layer),
++			    (int32_t)get32(a, 0), (int32_t)get32(a, 4),
++			    get32(a, 8), get32(a, 12),
++			    (int32_t)get32(b, 0), (int32_t)get32(b, 4),
++			    (int32_t)get32(b, 8), (int32_t)get32(b, 12));
++		}
++	}
++	if ((n % 1000) == 0) {
++		IOLog("NABU FB: %llu swaps\n", n);
+ 	}
+ }
+ 
+@@ -324,6 +417,21 @@
+ 		}
+ 	}
+ 
++	if (fFallback) {
++		bool any_layer = false;
++		for (uint32_t layer = 0; layer < NABU_FB_LAYERS; layer++) {
++			if ((mask & (1u << layer)) &&
++			    get32(rec, 0x54 + 4 * layer) != 0) {
++				any_layer = true;
++				break;
++			}
++		}
++		if (!any_layer) {
++			present_fallback();
++			return;
++		}
++	}
++
+ 	for (uint32_t layer = 0; layer < NABU_FB_LAYERS; layer++) {
+ 		uint32_t id = get32(rec, 0x54 + 4 * layer);
+ 		const uint8_t *a = rec + 0x64 + 16 * layer;
+@@ -399,6 +507,96 @@
+ 		}
+ 		s->release();
+ 	}
++}
++
++/*
++ * Bring-up fallback: the iPadOS renderer has produced pixels in a
++ * 1668x2224 BGRA surface, but its SwapEnd carries no layer ids.  Present
++ * the latest probed surface, letterboxed to the 1600x2560 panel.
++ */
++void
++AppleCLCD::present_fallback(void)
++{
++	uint32_t id = nabu_surface_bgra_hint_id();
++	if (id == 0) {
++		return;
++	}
++	NabuSurface *s = nabu_surface_copy(id);
++	if (s == NULL) {
++		return;
++	}
++	if (s == fSurface ||
++	    s->pixelFormat != 0x42475241 || s->bytesPerElement != 4 ||
++	    s->width == 0 || s->height == 0 || s->memory == NULL) {
++		s->release();
++		return;
++	}
++
++	uint32_t sw = s->width, sh = s->height, sbpr = s->bytesPerRow;
++	uintptr_t src = s->kernelAddress();
++	uint64_t src_len = s->memory->getLength();
++	uint32_t dw = fWidth;
++	uint32_t dh = (uint32_t)(((uint64_t)sh * dw) / sw);
++	uint32_t off = 0;
++	uint32_t scaled_w = dw;
++	uint32_t crop_x = 0;
++	if (fCrop) {
++		/* Aspect-fill: scale to panel height, crop the sides. */
++		dh = fHeight;
++		scaled_w = (uint32_t)(((uint64_t)sw * fHeight + sh - 1) / sh);
++		if (scaled_w < dw) {
++			scaled_w = dw;
++		}
++		crop_x = (scaled_w - dw) / 2;
++	} else if (fStretch) {
++		dh = fHeight;
++	} else {
++		if (dh > fHeight) {
++			dh = fHeight;
++		}
++		off = (fHeight - dh) / 2;
++	}
++
++	if (src == 0 || s->offset + (uint64_t)sh * sbpr > src_len) {
++		s->release();
++		return;
++	}
++
++	/* Black letterbox. */
++	for (uint32_t y = 0; y < off; y++) {
++		memset((void *)(fPixels + (uint64_t)y * fRowBytes), 0,
++		    (size_t)fWidth * 4);
++	}
++	for (uint32_t y = off + dh; y < fHeight; y++) {
++		memset((void *)(fPixels + (uint64_t)y * fRowBytes), 0,
++		    (size_t)fWidth * 4);
++	}
++
++	uint64_t xstep = ((uint64_t)sw << 16) / scaled_w;
++	uint64_t ystep = ((uint64_t)sh << 16) / dh;
++	uint64_t sx_row = (uint64_t)crop_x * xstep;
++	uint64_t sy_acc = 0;
++	for (uint32_t y = 0; y < dh; y++) {
++		uint32_t sy = (uint32_t)(sy_acc >> 16);
++		const uint8_t *srow = (const uint8_t *)(src + s->offset +
++		    (uint64_t)sy * sbpr);
++		uint32_t *drow = (uint32_t *)(fPixels +
++		    (uint64_t)(off + y) * fRowBytes);
++		uint64_t sx_acc = sx_row;
++		for (uint32_t x = 0; x < dw; x++) {
++			drow[x] = *(const uint32_t *)(srow +
++			    (uint64_t)(sx_acc >> 16) * 4);
++			sx_acc += xstep;
++		}
++		sy_acc += ystep;
++	}
++
++	if (!fFallbackLogged) {
++		fFallbackLogged = true;
++		IOLog("NABU FB: fallback surface %u %ux%u -> %ux%u y=%u\n",
++		    id, sw, sh, dw, dh, off);
++	}
++	s->release();
+ }
+ 
+ bool
+@@ -535,6 +733,10 @@
+ 	case kNabuFBRequestPowerChange:
+ 		if (args->scalarInputCount >= 1) {
+ 			bool off = args->scalarInput[0] == 0;
++			if (off && fFB->fForceOn) {
++				IOLog("NABU FB: display off ignored (nabufb_force_on)\n");
++				break;
++			}
+ 			IOLockLock(fFB->fLock);
+ 			if (off != fFB->fPowerOff) {
+ 				fFB->fPowerOff = off;
+diff --git a/iokit/Kernel/arm/NabuKeyStore.cpp b/iokit/Kernel/arm/NabuKeyStore.cpp
+--- a/iokit/Kernel/arm/NabuKeyStore.cpp
++++ b/iokit/Kernel/arm/NabuKeyStore.cpp
+@@ -6,9 +6,8 @@
+  * data protection. libaks (AppleKeyStore.framework, statically in keybagd)
+  * opens IOServiceMatching("AppleKeyStore") with type 0, calls selector 0,
+  * then one selector per aks_* function (iOS 16.7 numbering below). keybagd
+- * --init asks for the system bag (14) and only loads systembag.kb when the
+- * answer is kIOReturnNotFound; answering with a handle is the path a
+- * userspace reboot takes, so no bag file is needed.
++ * --init asks for the system bag (14); the bag itself is loaded from the
++ * device/bag handle, and the plain keybag file supplies BackupKeyBagKeys.
+  *
+  * Every call is logged (selector, caller, argument shapes, result) so the
+  * next selectors the system needs show up on the console; unknown ones fail
+@@ -185,6 +184,11 @@
+ 
+ 	switch (selector) {
+ 	case kAKSOpen:
++	/* SpringBoard's lock/unlock path uses these two; both are
++	 * argument-only setters on this no-passcode device.  Leaving them
++	 * unsupported makes SpringBoard retry the hold/unlock/drop loop. */
++	case 8:
++	case 32:
+ 	case kAKSUnloadBag:
+ 	case kAKSSetSystem:
+ 	case kAKSUnlockDevice:

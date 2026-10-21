@@ -1,0 +1,100 @@
+name: build-xnu-8796
+
+# Parallel line to build-kernel.yml (xnu-10063). This one targets the xnu generation
+# that actually matches an iPadOS 16.6.1 userland: xnu-8796.141.3 (macOS 13.5).
+#
+# Hard constraints, learned from the reference project (mytiantian001/iPadOS-nabu,
+# see docs/prior-art-mytiantian001-ipados-nabu.md):
+#   * Xcode 16's iig emits IORPC.kernelContent, which xnu-8796 does not have ->
+#     the runner must stay on macos-14 with its oldest Xcode 15.
+#   * libfirehose_kernel is built arm64e-only; the NABU kernel is plain arm64,
+#     so build.sh has to be told to build arm64 as well.
+#   * MACHINE_CONFIG=NABU selects the MASTER.arm64.nabu config that patch 0006 adds.
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_config:
+        description: RELEASE / DEVELOPMENT / DEBUG
+        default: DEVELOPMENT
+      keep_going:
+        description: make -k (collect all compile errors in one run)
+        default: "true"
+  push:
+    branches: [main]
+    paths:
+      - "xnu-8796/patches/**"
+      - ".github/workflows/build-kernel-8796.yml"
+
+concurrency:
+  group: xnu8796-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DXB_REPO: https://github.com/blacktop/darwin-xnu-build
+  DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
+  MACOS_VERSION: "13.5"          # -> xnu-8796.141.3
+  KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
+  MACHINE_CONFIG: NABU
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch build script
+        run: |
+          git init -q dxb
+          git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
+          git -C dxb checkout -q FETCH_HEAD
+          # patches and their staging scripts go next to blacktop's
+          cp xnu-8796/patches/*.patch xnu-8796/patches/*.sh dxb/patches/
+          # libfirehose_kernel is arm64e-only; the NABU kernel is plain arm64
+          sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
+          grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
+          ls dxb/patches | head -5
+          ls dxb/patches | wc -l
+
+      - name: Toolchain (Xcode 15 only)
+        run: |
+          brew install jq gum bash cmake ninja || true
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
+          sudo chmod +x /usr/local/bin/xcodes
+          sw_vers
+          ls -d /Applications/Xcode*.app
+          XC=$(ls -d /Applications/Xcode_15*.app | sort -V | head -1)
+          if [ -z "$XC" ]; then XC=$(ls -d /Applications/Xcode_*.app | sort -V | head -1); fi
+          echo "picked: $XC"
+          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+          xcrun --find iig
+
+      - name: Build
+        working-directory: dxb
+        env:
+          MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
+        run: |
+          bash build.sh 2>&1 | tee build.log
+          echo "=== exit: $? ==="
+          grep -c ' error: ' build.log || true
+
+      - name: Collect
+        if: always()
+        run: |
+          mkdir -p out
+          cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
+          ls -la out || true
+          (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xnu-8796-kernel
+          path: |
+            out/
+            dxb/build.log
+          if-no-files-found: warn

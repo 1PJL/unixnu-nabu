@@ -1,0 +1,1631 @@
+diff --git a/bsd/TargetConditionals.h b/bsd/TargetConditionals.h
+new file mode 100644
+--- /dev/null
++++ b/bsd/TargetConditionals.h
+@@ -0,0 +1,655 @@
++/*
++ * Copyright (c) 2000-2014 by Apple Inc.. All rights reserved.
++ *
++ * @APPLE_LICENSE_HEADER_START@
++ * 
++ * This file contains Original Code and/or Modifications of Original Code
++ * as defined in and that are subject to the Apple Public Source License
++ * Version 2.0 (the 'License'). You may not use this file except in
++ * compliance with the License. Please obtain a copy of the License at
++ * http://www.opensource.apple.com/apsl/ and read it before using this
++ * file.
++ * 
++ * The Original Code and all software distributed under the License are
++ * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
++ * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
++ * INCLUDING WITHOUT LIMITATION, ANY WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
++ * Please see the License for the specific language governing rights and
++ * limitations under the License.
++ * 
++ * @APPLE_LICENSE_HEADER_END@
++ */
++ 
++/*
++     File:       TargetConditionals.h
++ 
++     Contains:   Autoconfiguration of TARGET_ conditionals for Mac OS X and iPhone
++     
++                 Note:  TargetConditionals.h in 3.4 Universal Interfaces works
++                        with all compilers.  This header only recognizes compilers
++                        known to run on Mac OS X.
++  
++*/
++
++#ifndef __TARGETCONDITIONALS__
++#define __TARGETCONDITIONALS__
++
++/*
++ *
++ *  TARGET_CPU_*
++ *  These conditionals specify which microprocessor instruction set is being
++ *  generated.  At most one of these is true, the rest are false.
++ *
++ *      TARGET_CPU_PPC          - Compiler is generating PowerPC instructions for 32-bit mode
++ *      TARGET_CPU_PPC64        - Compiler is generating PowerPC instructions for 64-bit mode
++ *      TARGET_CPU_68K          - Compiler is generating 680x0 instructions
++ *      TARGET_CPU_X86          - Compiler is generating x86 instructions for 32-bit mode
++ *      TARGET_CPU_X86_64       - Compiler is generating x86 instructions for 64-bit mode
++ *      TARGET_CPU_ARM          - Compiler is generating ARM instructions for 32-bit mode
++ *      TARGET_CPU_ARM64        - Compiler is generating ARM instructions for 64-bit mode
++ *      TARGET_CPU_MIPS         - Compiler is generating MIPS instructions
++ *      TARGET_CPU_SPARC        - Compiler is generating Sparc instructions
++ *      TARGET_CPU_ALPHA        - Compiler is generating Dec Alpha instructions
++ */
++
++/*
++ *  TARGET_OS_*
++ *
++ *  These conditionals specify in which Operating System the generated code will
++ *  run.  Indention is used to show which conditionals are evolutionary subclasses.
++ *
++ *  The MAC/WIN32/UNIX conditionals are mutually exclusive.
++ *  The IOS/TV/WATCH/VISION conditionals are mutually exclusive.
++ *
++ *    TARGET_OS_WIN32              - Generated code will run on WIN32 API
++ *    TARGET_OS_WINDOWS            - Generated code will run on Windows
++ *    TARGET_OS_UNIX               - Generated code will run on some Unix (not macOS)
++ *    TARGET_OS_LINUX              - Generated code will run on Linux
++ *    TARGET_OS_MAC                - Generated code will run on a variant of macOS
++ *      TARGET_OS_OSX                - Generated code will run on macOS
++ *      TARGET_OS_IPHONE             - Generated code will run on a variant of iOS (firmware, devices, simulator)
++ *        TARGET_OS_IOS                - Generated code will run on iOS
++ *          TARGET_OS_MACCATALYST        - Generated code will run on macOS
++ *        TARGET_OS_TV                 - Generated code will run on tvOS
++ *        TARGET_OS_WATCH              - Generated code will run on watchOS
++ *        TARGET_OS_VISION             - Generated code will run on visionOS
++ *        TARGET_OS_BRIDGE             - Generated code will run on bridge devices
++ *      TARGET_OS_SIMULATOR          - Generated code will run on an iOS, tvOS, watchOS, or visionOS simulator
++ *      TARGET_OS_DRIVERKIT          - Generated code will run on macOS, iOS, tvOS, watchOS, or visionOS
++ *
++ *    TARGET_OS_EMBEDDED           - DEPRECATED: Use TARGET_OS_IPHONE and/or TARGET_OS_SIMULATOR instead
++ *    TARGET_IPHONE_SIMULATOR      - DEPRECATED: Same as TARGET_OS_SIMULATOR
++ *    TARGET_OS_NANO               - DEPRECATED: Same as TARGET_OS_WATCH
++ *
++ *    +--------------------------------------------------------------------------------------+
++ *    |                                    TARGET_OS_MAC                                     |
++ *    | +-----+ +------------------------------------------------------------+ +-----------+ |
++ *    | |     | |                  TARGET_OS_IPHONE                          | |           | |
++ *    | |     | | +-----------------+ +----+ +-------+ +--------+ +--------+ | |           | |
++ *    | |     | | |       IOS       | |    | |       | |        | |        | | |           | |
++ *    | | OSX | | | +-------------+ | | TV | | WATCH | | BRIDGE | | VISION | | | DRIVERKIT | |
++ *    | |     | | | | MACCATALYST | | |    | |       | |        | |        | | |           | |
++ *    | |     | | | +-------------+ | |    | |       | |        | |        | | |           | |
++ *    | |     | | +-----------------+ +----+ +-------+ +--------+ +--------+ | |           | |
++ *    | +-----+ +------------------------------------------------------------+ +-----------+ |
++ *    +--------------------------------------------------------------------------------------+
++ */
++
++/*
++ *  TARGET_RT_*
++ *
++ *  These conditionals specify in which runtime the generated code will
++ *  run. This is needed when the OS and CPU support more than one runtime
++ *  (e.g. Mac OS X supports CFM and mach-o).
++ *
++ *      TARGET_RT_LITTLE_ENDIAN - Generated code uses little endian format for integers
++ *      TARGET_RT_BIG_ENDIAN    - Generated code uses big endian format for integers
++ *      TARGET_RT_64_BIT        - Generated code uses 64-bit pointers
++ *      TARGET_RT_MAC_CFM       - TARGET_OS_MAC is true and CFM68K or PowerPC CFM (TVectors) are used
++ *      TARGET_RT_MAC_MACHO     - TARGET_OS_MAC is true and Mach-O/dlyd runtime is used
++ */
++ 
++/*
++ * TARGET_OS conditionals can be enabled via clang preprocessor extensions:
++ *
++ *      __is_target_arch
++ *      __is_target_vendor
++ *      __is_target_os
++ *      __is_target_environment
++ *
++ *  "-target=x86_64-apple-ios12-macabi"
++ *      TARGET_OS_MAC=1
++ *      TARGET_OS_IPHONE=1
++ *      TARGET_OS_IOS=1
++ *      TARGET_OS_MACCATALYST=1
++ *
++ *  "-target=x86_64-apple-ios12-simulator"
++ *      TARGET_OS_MAC=1
++ *      TARGET_OS_IPHONE=1
++ *      TARGET_OS_IOS=1
++ *      TARGET_OS_SIMULATOR=1
++ *
++ * DYNAMIC_TARGETS_ENABLED indicates that the core TARGET_OS macros were enabled via clang preprocessor extensions.
++ * If this value is not set, the macro enablements will fall back to the static behavior.
++ * It is disabled by default.
++ */
++
++#if defined(__has_builtin)
++ #if __has_builtin(__is_target_arch)
++  #if __has_builtin(__is_target_vendor)
++   #if __has_builtin(__is_target_os)
++    #if __has_builtin(__is_target_environment)
++
++    /* "-target=x86_64-apple-ios12-macabi" */
++    /* "-target=arm64-apple-ios12-macabi" */
++    /* "-target=arm64e-apple-ios12-macabi" */
++    #if (__is_target_arch(x86_64) || __is_target_arch(arm64) || __is_target_arch(arm64e)) && __is_target_vendor(apple) && __is_target_os(ios) && __is_target_environment(macabi)
++        #define TARGET_OS_MAC               1
++        #define TARGET_OS_OSX               0
++        #define TARGET_OS_IPHONE            1
++        #define TARGET_OS_IOS               1
++        #define TARGET_OS_WATCH             0
++        
++        #define TARGET_OS_TV                0
++        #define TARGET_OS_SIMULATOR         0
++        #define TARGET_OS_EMBEDDED          0    
++        #define TARGET_OS_RTKIT             0
++        #define TARGET_OS_MACCATALYST       1
++        #define TARGET_OS_MACCATALYST            1
++
++        #define TARGET_OS_VISION            0
++        
++        
++        #ifndef TARGET_OS_UIKITFORMAC
++         #define TARGET_OS_UIKITFORMAC      1
++        #endif
++        #define TARGET_OS_DRIVERKIT         0
++        #define DYNAMIC_TARGETS_ENABLED     1
++    #endif 
++
++    /* "-target=x86_64-apple-ios12-simulator" */
++    /* "-target=arm64-apple-ios12-simulator" */
++    /* "-target=arm64e-apple-ios12-simulator" */
++    #if (__is_target_arch(x86_64) || __is_target_arch(arm64) || __is_target_arch(arm64e)) && __is_target_vendor(apple) && __is_target_os(ios) && __is_target_environment(simulator)
++        #define TARGET_OS_MAC               1
++        #define TARGET_OS_OSX               0
++        #define TARGET_OS_IPHONE            1
++        #define TARGET_OS_IOS               1
++        #define TARGET_OS_WATCH             0
++        
++        #define TARGET_OS_TV                0
++        #define TARGET_OS_SIMULATOR         1
++        #define TARGET_OS_EMBEDDED          0    
++        #define TARGET_OS_RTKIT             0
++        #define TARGET_OS_MACCATALYST       0
++        #define TARGET_OS_MACCATALYST            0
++
++        #define TARGET_OS_VISION            0
++        
++        
++        #ifndef TARGET_OS_UIKITFORMAC
++         #define TARGET_OS_UIKITFORMAC      0
++        #endif
++        #define TARGET_OS_DRIVERKIT         0
++        #define DYNAMIC_TARGETS_ENABLED     1
++    #endif 
++
++
++
++    /* "-target=arm64e-apple-xros1.0" */
++    #if (__is_target_arch(arm64e) || __is_target_arch(arm64)) && __is_target_vendor(apple) && __is_target_os(xros)
++        #define TARGET_OS_MAC               1
++        #define TARGET_OS_OSX               0
++        #define TARGET_OS_IPHONE            1
++
++        #define TARGET_OS_IOS               0
++
++        #define TARGET_OS_WATCH             0
++        
++        #define TARGET_OS_TV                0
++        #define TARGET_OS_SIMULATOR         0
++        #define TARGET_OS_EMBEDDED          1
++        #define TARGET_OS_RTKIT             0
++        #define TARGET_OS_MACCATALYST       0
++        #define TARGET_OS_MACCATALYST            0
++
++        #define TARGET_OS_VISION            1
++        
++        
++        #ifndef TARGET_OS_UIKITFORMAC
++         #define TARGET_OS_UIKITFORMAC      0
++        #endif
++        #define TARGET_OS_DRIVERKIT         0
++        #define DYNAMIC_TARGETS_ENABLED     1
++    #endif
++
++    /* "-target=arm64e-apple-xros1.0-simulator" */
++    #if (__is_target_arch(x86_64) || __is_target_arch(arm64) || __is_target_arch(arm64e)) && __is_target_vendor(apple) && __is_target_os(xros) && __is_target_environment(simulator)
++        #define TARGET_OS_MAC               1
++        #define TARGET_OS_OSX               0
++        #define TARGET_OS_IPHONE            1
++
++        #define TARGET_OS_IOS               0
++
++        #define TARGET_OS_WATCH             0
++        
++        #define TARGET_OS_TV                0
++        #define TARGET_OS_SIMULATOR         1
++        #define TARGET_OS_EMBEDDED          0
++        #define TARGET_OS_RTKIT             0
++        #define TARGET_OS_MACCATALYST       0
++        #define TARGET_OS_MACCATALYST            0
++
++        #define TARGET_OS_VISION            1
++        
++        
++        #ifndef TARGET_OS_UIKITFORMAC
++         #define TARGET_OS_UIKITFORMAC      0
++        #endif
++        #define TARGET_OS_DRIVERKIT         0
++        #define DYNAMIC_TARGETS_ENABLED     1
++    #endif
++
++    
++    
++    //FIXME: Workaround for rdar://100536146
++    #if (__is_target_vendor(apple) && defined(__APPLE_EXCLAVECORE__) && __APPLE_EXCLAVECORE__)
++        #define TARGET_OS_MAC               0
++        #define TARGET_OS_OSX               0
++        #define TARGET_OS_IPHONE            0
++        #define TARGET_OS_IOS               0
++        #define TARGET_OS_WATCH             0
++        
++        #define TARGET_OS_TV                0
++        #define TARGET_OS_SIMULATOR         0
++        #define TARGET_OS_EMBEDDED          0
++        #define TARGET_OS_RTKIT             0
++        #define TARGET_OS_MACCATALYST       0
++        #define TARGET_OS_MACCATALYST            0
++
++        #define TARGET_OS_VISION            0
++        
++        
++        #ifndef TARGET_OS_UIKITFORMAC
++         #define TARGET_OS_UIKITFORMAC      0
++        #endif
++        #define TARGET_OS_DRIVERKIT         0
++        #define DYNAMIC_TARGETS_ENABLED     1
++    #endif
++
++    
++    
++    //FIXME: Workaround for rdar://100536146
++    #if (__is_target_vendor(apple) && defined(__APPLE_EXCLAVEKIT__) && __APPLE_EXCLAVEKIT__)
++        #define TARGET_OS_MAC               1
++        #define TARGET_OS_OSX               0
++        #define TARGET_OS_IPHONE            0
++        #define TARGET_OS_IOS               0
++        #define TARGET_OS_WATCH             0
++        
++        #define TARGET_OS_TV                0
++        #define TARGET_OS_SIMULATOR         0
++        #define TARGET_OS_EMBEDDED          0
++        #define TARGET_OS_RTKIT             0
++        #define TARGET_OS_MACCATALYST       0
++        #define TARGET_OS_MACCATALYST            0
++
++        #define TARGET_OS_VISION            0
++        
++        
++        #ifndef TARGET_OS_UIKITFORMAC
++         #define TARGET_OS_UIKITFORMAC      0
++        #endif
++        #define TARGET_OS_DRIVERKIT         0
++        #define DYNAMIC_TARGETS_ENABLED     1
++    #endif
++
++    /* "-target=x86_64-apple-driverkit19.0" */
++    /* "-target=arm64-apple-driverkit19.0" */
++    /* "-target=arm64e-apple-driverkit19.0" */
++    #if __is_target_vendor(apple) && __is_target_os(driverkit)
++        #define TARGET_OS_MAC               1
++        #define TARGET_OS_OSX               0
++        #define TARGET_OS_IPHONE            0
++        #define TARGET_OS_IOS               0
++        #define TARGET_OS_WATCH             0
++        
++        #define TARGET_OS_TV                0
++        #define TARGET_OS_SIMULATOR         0
++        #define TARGET_OS_EMBEDDED          0
++        #define TARGET_OS_RTKIT             0
++        #define TARGET_OS_MACCATALYST       0
++        #define TARGET_OS_MACCATALYST            0
++
++        #define TARGET_OS_VISION            0
++        
++        
++        #ifndef TARGET_OS_UIKITFORMAC
++         #define TARGET_OS_UIKITFORMAC      0
++        #endif
++        #define TARGET_OS_DRIVERKIT         1
++        #define DYNAMIC_TARGETS_ENABLED     1
++    #endif
++
++    #endif /* #if __has_builtin(__is_target_environment) */
++   #endif /* #if __has_builtin(__is_target_os) */
++  #endif /* #if __has_builtin(__is_target_vendor) */
++ #endif /* #if __has_builtin(__is_target_arch) */
++#endif /* #if defined(__has_builtin) */
++
++
++#ifndef DYNAMIC_TARGETS_ENABLED
++ #define DYNAMIC_TARGETS_ENABLED   0
++#endif /* DYNAMIC_TARGETS_ENABLED */
++
++/*
++ *    gcc based compiler used on Mac OS X
++ */
++#if defined(__GNUC__) && ( defined(__APPLE_CPP__) || defined(__APPLE_CC__) || defined(__MACOS_CLASSIC__) )
++    #define TARGET_OS_WIN32             0
++    #define TARGET_OS_WINDOWS           0
++    #define TARGET_OS_UNIX              0
++    #define TARGET_OS_LINUX             0
++
++    #if !DYNAMIC_TARGETS_ENABLED
++        #define TARGET_OS_MAC               1
++        #define TARGET_OS_OSX               1
++        #define TARGET_OS_IPHONE            0
++
++        #define TARGET_OS_IOS               0
++
++        #define TARGET_OS_WATCH             0
++        
++        #define TARGET_OS_TV                0
++        #define TARGET_OS_MACCATALYST       0
++        #define TARGET_OS_MACCATALYST            0
++        
++        
++
++        #define TARGET_OS_VISION            0
++        #ifndef TARGET_OS_UIKITFORMAC
++         #define TARGET_OS_UIKITFORMAC      0
++        #endif
++        #define TARGET_OS_SIMULATOR         0
++        #define TARGET_OS_EMBEDDED          0 
++        #define TARGET_OS_RTKIT             0 
++        #define TARGET_OS_DRIVERKIT         0
++    #endif
++    
++    #define TARGET_IPHONE_SIMULATOR     TARGET_OS_SIMULATOR /* deprecated */
++    #define TARGET_OS_NANO              TARGET_OS_WATCH /* deprecated */ 
++
++    #define TARGET_ABI_USES_IOS_VALUES  (!TARGET_CPU_X86_64 || (TARGET_OS_IPHONE && !TARGET_OS_MACCATALYST))
++    #if defined(__ppc__)
++        #define TARGET_CPU_PPC          1
++        #define TARGET_CPU_PPC64        0
++        #define TARGET_CPU_68K          0
++        #define TARGET_CPU_X86          0
++        #define TARGET_CPU_X86_64       0
++        #define TARGET_CPU_ARM          0
++        #define TARGET_CPU_ARM64        0
++        #define TARGET_CPU_MIPS         0
++        #define TARGET_CPU_SPARC        0   
++        #define TARGET_CPU_ALPHA        0
++        #define TARGET_RT_LITTLE_ENDIAN 0
++        #define TARGET_RT_BIG_ENDIAN    1
++        #define TARGET_RT_64_BIT        0
++        #ifdef __MACOS_CLASSIC__
++           #define TARGET_RT_MAC_CFM    1
++           #define TARGET_RT_MAC_MACHO  0
++        #else
++           #define TARGET_RT_MAC_CFM    0
++           #define TARGET_RT_MAC_MACHO  1
++       #endif
++    #elif defined(__ppc64__) 
++        #define TARGET_CPU_PPC          0
++        #define TARGET_CPU_PPC64        1
++        #define TARGET_CPU_68K          0
++        #define TARGET_CPU_X86          0
++        #define TARGET_CPU_X86_64       0
++        #define TARGET_CPU_ARM          0
++        #define TARGET_CPU_ARM64        0
++        #define TARGET_CPU_MIPS         0
++        #define TARGET_CPU_SPARC        0   
++        #define TARGET_CPU_ALPHA        0
++        #define TARGET_RT_LITTLE_ENDIAN 0
++        #define TARGET_RT_BIG_ENDIAN    1
++        #define TARGET_RT_64_BIT        1
++        #define TARGET_RT_MAC_CFM       0
++        #define TARGET_RT_MAC_MACHO     1
++    #elif defined(__i386__) 
++        #define TARGET_CPU_PPC          0
++        #define TARGET_CPU_PPC64        0
++        #define TARGET_CPU_68K          0
++        #define TARGET_CPU_X86          1
++        #define TARGET_CPU_X86_64       0
++        #define TARGET_CPU_ARM          0
++        #define TARGET_CPU_ARM64        0
++        #define TARGET_CPU_MIPS         0
++        #define TARGET_CPU_SPARC        0
++        #define TARGET_CPU_ALPHA        0
++        #define TARGET_RT_MAC_CFM       0
++        #define TARGET_RT_MAC_MACHO     1
++        #define TARGET_RT_LITTLE_ENDIAN 1
++        #define TARGET_RT_BIG_ENDIAN    0
++        #define TARGET_RT_64_BIT        0
++    #elif defined(__x86_64__) 
++        #define TARGET_CPU_PPC          0
++        #define TARGET_CPU_PPC64        0
++        #define TARGET_CPU_68K          0
++        #define TARGET_CPU_X86          0
++        #define TARGET_CPU_X86_64       1
++        #define TARGET_CPU_ARM          0
++        #define TARGET_CPU_ARM64        0
++        #define TARGET_CPU_MIPS         0
++        #define TARGET_CPU_SPARC        0
++        #define TARGET_CPU_ALPHA        0
++        #define TARGET_RT_MAC_CFM       0
++        #define TARGET_RT_MAC_MACHO     1
++        #define TARGET_RT_LITTLE_ENDIAN 1
++        #define TARGET_RT_BIG_ENDIAN    0
++        #define TARGET_RT_64_BIT        1
++    #elif defined(__arm__) 
++        #define TARGET_CPU_PPC          0
++        #define TARGET_CPU_PPC64        0
++        #define TARGET_CPU_68K          0
++        #define TARGET_CPU_X86          0
++        #define TARGET_CPU_X86_64       0
++        #define TARGET_CPU_ARM          1
++        #define TARGET_CPU_ARM64        0
++        #define TARGET_CPU_MIPS         0
++        #define TARGET_CPU_SPARC        0
++        #define TARGET_CPU_ALPHA        0
++        #define TARGET_RT_MAC_CFM       0
++        #define TARGET_RT_MAC_MACHO     1
++        #define TARGET_RT_LITTLE_ENDIAN 1
++        #define TARGET_RT_BIG_ENDIAN    0
++        #define TARGET_RT_64_BIT        0
++    #elif defined(__arm64__)
++        #define TARGET_CPU_PPC          0
++        #define TARGET_CPU_PPC64        0
++        #define TARGET_CPU_68K          0
++        #define TARGET_CPU_X86          0
++        #define TARGET_CPU_X86_64       0
++        #define TARGET_CPU_ARM          0
++        #define TARGET_CPU_ARM64        1
++        #define TARGET_CPU_MIPS         0
++        #define TARGET_CPU_SPARC        0
++        #define TARGET_CPU_ALPHA        0
++        #define TARGET_RT_MAC_CFM       0
++        #define TARGET_RT_MAC_MACHO     1
++        #define TARGET_RT_LITTLE_ENDIAN 1
++        #define TARGET_RT_BIG_ENDIAN    0
++        #if __LP64__
++          #define TARGET_RT_64_BIT      1
++        #else
++          #define TARGET_RT_64_BIT      0
++        #endif
++    #else
++        #error unrecognized GNU C compiler
++    #endif
++
++
++
++/*
++ *   CodeWarrior compiler from Metrowerks/Motorola
++ */
++#elif defined(__MWERKS__)
++    #define TARGET_OS_MAC               1
++    #define TARGET_OS_WIN32             0
++    #define TARGET_OS_WINDOWS           0
++    #define TARGET_OS_UNIX              0
++    #define TARGET_OS_LINUX             0
++    #define TARGET_OS_EMBEDDED          0
++    #if defined(__POWERPC__)
++        #define TARGET_CPU_PPC          1
++        #define TARGET_CPU_PPC64        0
++        #define TARGET_CPU_68K          0
++        #define TARGET_CPU_X86          0
++        #define TARGET_CPU_MIPS         0
++        #define TARGET_CPU_SPARC        0
++        #define TARGET_CPU_ALPHA        0
++        #define TARGET_RT_LITTLE_ENDIAN 0
++        #define TARGET_RT_BIG_ENDIAN    1
++    #elif defined(__INTEL__)
++        #define TARGET_CPU_PPC          0
++        #define TARGET_CPU_PPC64        0
++        #define TARGET_CPU_68K          0
++        #define TARGET_CPU_X86          1
++        #define TARGET_CPU_MIPS         0
++        #define TARGET_CPU_SPARC        0
++        #define TARGET_CPU_ALPHA        0
++        #define TARGET_RT_LITTLE_ENDIAN 1
++        #define TARGET_RT_BIG_ENDIAN    0
++    #else
++        #error unknown Metrowerks CPU type
++    #endif
++    #define TARGET_RT_64_BIT            0
++    #ifdef __MACH__
++        #define TARGET_RT_MAC_CFM       0
++        #define TARGET_RT_MAC_MACHO     1
++    #else
++        #define TARGET_RT_MAC_CFM       1
++        #define TARGET_RT_MAC_MACHO     0
++    #endif
++
++/*
++ *   unknown compiler
++ */
++#else
++    #if defined(TARGET_CPU_PPC) && TARGET_CPU_PPC
++        #define TARGET_CPU_PPC64    0
++        #define TARGET_CPU_68K      0
++        #define TARGET_CPU_X86      0
++        #define TARGET_CPU_X86_64   0
++        #define TARGET_CPU_ARM      0
++        #define TARGET_CPU_ARM64    0
++        #define TARGET_CPU_MIPS     0
++        #define TARGET_CPU_SPARC    0
++        #define TARGET_CPU_ALPHA    0
++    #elif defined(TARGET_CPU_PPC64) && TARGET_CPU_PPC64
++        #define TARGET_CPU_PPC      0
++        #define TARGET_CPU_68K      0
++        #define TARGET_CPU_X86      0
++        #define TARGET_CPU_X86_64   0
++        #define TARGET_CPU_ARM      0
++        #define TARGET_CPU_ARM64    0
++        #define TARGET_CPU_MIPS     0
++        #define TARGET_CPU_SPARC    0
++        #define TARGET_CPU_ALPHA    0
++    #elif defined(TARGET_CPU_X86) && TARGET_CPU_X86
++        #define TARGET_CPU_PPC      0
++        #define TARGET_CPU_PPC64    0
++        #define TARGET_CPU_X86_64   0
++        #define TARGET_CPU_68K      0
++        #define TARGET_CPU_ARM      0
++        #define TARGET_CPU_ARM64    0
++        #define TARGET_CPU_MIPS     0
++        #define TARGET_CPU_SPARC    0
++        #define TARGET_CPU_ALPHA    0
++    #elif defined(TARGET_CPU_X86_64) && TARGET_CPU_X86_64
++        #define TARGET_CPU_PPC      0
++        #define TARGET_CPU_PPC64    0
++        #define TARGET_CPU_X86      0
++        #define TARGET_CPU_68K      0
++        #define TARGET_CPU_ARM      0
++        #define TARGET_CPU_ARM64    0
++        #define TARGET_CPU_MIPS     0
++        #define TARGET_CPU_SPARC    0
++        #define TARGET_CPU_ALPHA    0
++    #elif defined(TARGET_CPU_ARM) && TARGET_CPU_ARM
++        #define TARGET_CPU_PPC      0
++        #define TARGET_CPU_PPC64    0
++        #define TARGET_CPU_X86      0
++        #define TARGET_CPU_X86_64   0
++        #define TARGET_CPU_68K      0
++        #define TARGET_CPU_ARM64    0
++        #define TARGET_CPU_MIPS     0
++        #define TARGET_CPU_SPARC    0
++        #define TARGET_CPU_ALPHA    0
++    #elif defined(TARGET_CPU_ARM64) && TARGET_CPU_ARM64
++        #define TARGET_CPU_PPC      0
++        #define TARGET_CPU_PPC64    0
++        #define TARGET_CPU_X86      0
++        #define TARGET_CPU_X86_64   0
++        #define TARGET_CPU_68K      0
++        #define TARGET_CPU_ARM      0
++        #define TARGET_CPU_MIPS     0
++        #define TARGET_CPU_SPARC    0
++        #define TARGET_CPU_ALPHA    0
++    #else
++        /*
++            NOTE:   If your compiler errors out here then support for your compiler 
++            has not yet been added to TargetConditionals.h.  
++            
++            TargetConditionals.h is designed to be plug-and-play.  It auto detects
++            which compiler is being run and configures the TARGET_ conditionals
++            appropriately.  
++            
++            The short term work around is to set the TARGET_CPU_ and TARGET_OS_
++            on the command line to the compiler (e.g. -DTARGET_CPU_MIPS=1 -DTARGET_OS_UNIX=1)
++            
++            The long term solution is to add a new case to this file which
++            auto detects your compiler and sets up the TARGET_ conditionals.
++            Then submit the changes to Apple Computer.
++        */
++        #error TargetConditionals.h: unknown compiler (see comment above)
++        #define TARGET_CPU_PPC    0
++        #define TARGET_CPU_68K    0
++        #define TARGET_CPU_X86    0
++        #define TARGET_CPU_ARM    0
++        #define TARGET_CPU_ARM64  0
++        #define TARGET_CPU_MIPS   0
++        #define TARGET_CPU_SPARC  0
++        #define TARGET_CPU_ALPHA  0
++    #endif
++    #define TARGET_OS_MAC                1
++    #define TARGET_OS_WIN32              0
++    #define TARGET_OS_WINDOWS            0
++    #define TARGET_OS_UNIX               0
++    #define TARGET_OS_LINUX              0
++    #define TARGET_OS_EMBEDDED           0
++    #if TARGET_CPU_PPC || TARGET_CPU_PPC64
++        #define TARGET_RT_BIG_ENDIAN     1
++        #define TARGET_RT_LITTLE_ENDIAN  0
++    #else
++        #define TARGET_RT_BIG_ENDIAN     0
++        #define TARGET_RT_LITTLE_ENDIAN  1
++    #endif
++    #if TARGET_CPU_PPC64 || TARGET_CPU_X86_64
++        #define TARGET_RT_64_BIT         1
++    #else
++        #define TARGET_RT_64_BIT         0
++    #endif
++    #ifdef __MACH__
++        #define TARGET_RT_MAC_MACHO      1
++        #define TARGET_RT_MAC_CFM        0
++    #else
++        #define TARGET_RT_MAC_MACHO      0
++        #define TARGET_RT_MAC_CFM        1
++    #endif
++    
++#endif
++
++#endif  /* __TARGETCONDITIONALS__ */
+diff --git a/bsd/conf/Makefile.template b/bsd/conf/Makefile.template
+--- a/bsd/conf/Makefile.template
++++ b/bsd/conf/Makefile.template
+@@ -44,8 +44,8 @@
+         -Warray-bounds-pointer-arithmetic
+ SFLAGS+= -include meta_features.h
+ 
+-# This provider is built into NABU; other boards use their normal kext.
+-ifeq ($(CURRENT_MACHINE_CONFIG),NABU)
++# This provider is built into NABU/NABU; other boards use their normal kext.
++ifneq ($(filter $(CURRENT_MACHINE_CONFIG),NABU NABU),)
+ NABU_PTHREAD_ROOT = $(SRCROOT)/bsd/pthread/nabu_libpthread
+ NABU_PTHREAD_INC = -I$(NABU_PTHREAD_ROOT) -I$(NABU_PTHREAD_ROOT)/private -I$(NABU_PTHREAD_ROOT)/include
+ nabu_pthread_init.o_INCFLAGS = $(NABU_PTHREAD_INC)
+diff --git a/bsd/dev/nabu_ufs.c b/bsd/dev/nabu_ufs.c
+--- a/bsd/dev/nabu_ufs.c
++++ b/bsd/dev/nabu_ufs.c
+@@ -18,7 +18,7 @@
+  * against the partition bounds again right before it is issued, so nothing
+  * outside the named partition can be written.
+  */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include <sys/param.h>
+ #include <sys/systm.h>
+ #include <sys/buf.h>
+@@ -220,7 +220,7 @@
+ 		uint64_t now = mach_absolute_time();
+ 		if (now > deadline) {
+ 			ufs_wr(REG_UTRLCLR, ~1u);
+-			printf("NABU UFS: command 0x%02x timed out\n", cdb[0]);
++			printf("NABU UFS: command 0x%02x timed out\n", cdb[0]);
+ 			return ETIMEDOUT;
+ 		}
+ 		if (sleepable && now >= spin_until) {
+@@ -249,7 +249,7 @@
+ 
+ 	uint32_t ocs = utrd->dw2 & 0xff;
+ 	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
+-		printf("NABU UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
++		printf("NABU UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
+ 		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
+ 		return EIO;
+ 	}
+@@ -281,7 +281,7 @@
+ 	if (!su.writable || !su.nblocks || count == 0 || count > BOUNCE_SIZE / UFS_BLOCK ||
+ 	    lba < su.first_block || lba - su.first_block >= su.nblocks ||
+ 	    count > su.nblocks - (lba - su.first_block) || lba + count - 1 > UINT32_MAX) {
+-		printf("NABU UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
++		printf("NABU UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
+ 		return EPERM;
+ 	}
+ 	uint8_t cdb[10] = {
+@@ -308,7 +308,7 @@
+ 		return error;
+ 	}
+ 	if (memcmp(b, "EFI PART", 8) != 0) {
+-		printf("NABU UFS: LUN %u has no GPT\n", su.lun);
++		printf("NABU UFS: LUN %u has no GPT\n", su.lun);
+ 		return ENXIO;
+ 	}
+ 	uint64_t entry_lba;
+@@ -317,7 +317,7 @@
+ 	memcpy(&nent, b + 80, 4);
+ 	memcpy(&esz, b + 84, 4);
+ 	if (esz != 128 || nent == 0 || nent * esz > BOUNCE_SIZE) {
+-		printf("NABU UFS: unsupported GPT entries %u x %u\n", nent, esz);
++		printf("NABU UFS: unsupported GPT entries %u x %u\n", nent, esz);
+ 		return ENXIO;
+ 	}
+ 	error = ufs_read_blocks(entry_lba, (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK);
+@@ -349,7 +349,7 @@
+ 		su.nblocks = last - first + 1;
+ 		return 0;
+ 	}
+-	printf("NABU UFS: no GPT partition named \"%s\"\n", want);
++	printf("NABU UFS: no GPT partition named \"%s\"\n", want);
+ 	return ENOENT;
+ }
+ 
+@@ -358,16 +358,16 @@
+ {
+ 	uint32_t hce = ufs_rd(REG_HCE), hcs = ufs_rd(REG_HCS);
+ 	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
+-		printf("NABU UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
++		printf("NABU UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
+ 		return ENXIO;
+ 	}
+ 	if (ufs_rd(REG_UTRLDBR)) {
+-		printf("NABU UFS: requests outstanding from the bootloader\n");
++		printf("NABU UFS: requests outstanding from the bootloader\n");
+ 		return EBUSY;
+ 	}
+ 	/* With RAM above 4 GiB (mkadt.py --highmem) the DMA memory can be there too. */
+ 	if (((su.dma_pa + DMA_SIZE - 1) >> 32) && !(ufs_rd(REG_CAP) & CAP_64AS)) {
+-		printf("NABU UFS: DMA memory at 0x%llx but the host has no 64-bit addressing\n",
++		printf("NABU UFS: DMA memory at 0x%llx but the host has no 64-bit addressing\n",
+ 		    su.dma_pa);
+ 		return ENXIO;
+ 	}
+@@ -381,7 +381,7 @@
+ 	/* Never ring a doorbell unless the host uses our list. */
+ 	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
+ 	    !(ufs_rd(REG_UTRLRSR) & 1)) {
+-		printf("NABU UFS: host did not take our request list\n");
++		printf("NABU UFS: host did not take our request list\n");
+ 		return EIO;
+ 	}
+ 	return 0;
+@@ -587,6 +587,7 @@
+ nabu_ufs_init(void)
+ {
+ 	DTEntry node;
++	printf("NABU UFS: init entry\n");
+ 	uintptr_t const *reg = NULL;
+ 	unsigned int size = 0;
+ 	char want[64] = "userdata";
+@@ -595,7 +596,7 @@
+ 	if (SecureDTLookupEntry(NULL, "/nabu-ufs", &node) != kSuccess ||
+ 	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
+ 	    size < 2 * sizeof(uintptr_t)) {
+-		printf("NABU UFS: no /nabu-ufs node in the device tree\n");
++		printf("NABU UFS: no /nabu-ufs node in the device tree\n");
+ 		return ENXIO;
+ 	}
+ 	PE_parse_boot_argn("ufsroot", want, sizeof(want));
+@@ -610,7 +611,7 @@
+ 	su.regs = ml_io_map(reg[0], reg[1]);
+ 	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+-		printf("NABU UFS: no contiguous DMA memory\n");
++		printf("NABU UFS: no contiguous DMA memory\n");
+ 		return ENOMEM;
+ 	}
+ 	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)su.dma);
+@@ -651,15 +652,19 @@
+ 	/* Only now, with the partition bounds known, can writes be allowed. */
+ 	su.writable = (rw != 0);
+ 	su.ready = true;
+-	printf("NABU UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, %s, DMA at 0x%llx\n",
++	printf("NABU UFS: \"%s\" on LUN %u: first block 0x%llx, %llu MiB, %s, DMA at 0x%llx\n",
+ 	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
+ 	    su.writable ? "read-write" : "read-only", su.dma_pa);
+ 	nabu_log_start();
+ 	nabu_sample_start();
+-	/* Input drivers (HID services in iokit/Kernel/arm/hid/NabuHID.cpp). */
++	/* Input drivers (HID services in iokit/Kernel/arm/hid/NabuHID.cpp).
++	 * SM7150 register maps only; NABU needs its own PM8150/GENI/MTU3
++	 * bring-up, so leave them out of the console milestone. */
++#if defined(ARM64_BOARD_CONFIG_NABU)
+ 	nabu_keys_init();
+ 	nabu_touch_init();
+ 	nabu_usb_probe();
++#endif
+ 	return 0;
+ }
+ 
+@@ -743,7 +748,7 @@
+ 	uint64_t flushed = 0, seq = 0;
+ 	void *bounce = (void *)(su.dma + DMA_BOUNCE);
+ 
+-	printf("NABU LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
++	printf("NABU LOG: console log to the last %u KiB of the partition (block 0x%llx)\n",
+ 	    NABU_LOG_BLOCKS * UFS_BLOCK >> 10, base);
+ 	for (;;) {
+ 		(void)tsleep(&nabu_log_chan, PZERO, "nabulog", hz * (int)nabu_log_secs);
+@@ -779,7 +784,7 @@
+ 		}
+ 		lck_mtx_unlock(&nabu_ufs_lock);
+ 		if (error) {
+-			printf("NABU LOG: write failed (%d), stopping\n", error);
++			printf("NABU LOG: write failed (%d), stopping\n", error);
+ 			return;
+ 		}
+ 		flushed = total;
+@@ -820,4 +825,4 @@
+ 	*dev = su.bdev;
+ 	return 0;
+ }
+-#endif /* ARM64_BOARD_CONFIG_NABU */
++#endif /* ARM64_BOARD_CONFIG_NABU || ARM64_BOARD_CONFIG_NABU */
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -476,6 +476,7 @@
+ void
+ bsd_init(void)
+ {
++	printf("NABU BSD: bsd_init enter\n");
+ 	struct uthread *ut;
+ 	vnode_t init_rootvnode = NULLVP;
+ 	struct proc_ro_data kernproc_ro_data = {
+@@ -754,8 +755,9 @@
+ #if NETWORKING
+ 	bsd_init_kprintf("calling nwk_wq_init\n");
+ 	nwk_wq_init();
+-	bsd_init_kprintf("calling dlil_init\n");
++	printf("NABU BSD: before dlil_init\n");
+ 	dlil_init();
++	printf("NABU BSD: after dlil_init\n");
+ #endif /* NETWORKING */
+ #if SOCKETS
+ 	bsd_init_kprintf("calling socketinit\n");
+@@ -797,8 +799,9 @@
+ 	bsd_init_kprintf("calling sysctl_mib_init\n");
+ 	sysctl_mib_init();
+ 
+-	bsd_init_kprintf("calling bsd_autoconf\n");
++	printf("NABU BSD: before bsd_autoconf\n");
+ 	bsd_autoconf();
++	printf("NABU BSD: after bsd_autoconf\n");
+ 
+ #if CONFIG_DTRACE
+ 	dtrace_postinit();
+@@ -940,7 +943,7 @@
+ 			 * cannot be a sealed volume. Report it instead of panicking.
+ 			 */
+ 			if (autherr) {
+-				printf("NABU: root volume is not authenticated (error %d); continuing unsealed\n", autherr);
++				printf("NABU: root volume is not authenticated (error %d); continuing unsealed\n", autherr);
+ 			}
+ #else
+ 			if (autherr) {
+@@ -1107,6 +1110,7 @@
+ {
+ 	kprintf("bsd_autoconf: calling kminit\n");
+ 	kminit();
++	printf("NABU BSD: after kminit\n");
+ 
+ 	/*
+ 	 * Early startup for bsd pseudodevices.
+@@ -1119,7 +1123,10 @@
+ 		}
+ 	}
+ 
+-	return IOKitBSDInit();
++	printf("NABU BSD: before IOKitBSDInit\n");
++	kern_return_t kr = IOKitBSDInit();
++	printf("NABU BSD: after IOKitBSDInit kr=%d\n", kr);
++	return kr;
+ }
+ 
+ 
+@@ -1131,7 +1138,9 @@
+ 	u_int32_t       flags;
+ 	kern_return_t   err;
+ 
++	printf("NABU: setconf before IOFindBSDRoot\n");
+ 	err = IOFindBSDRoot(rootdevice, sizeof(rootdevice), &rootdev, &flags);
++	printf("NABU: setconf after IOFindBSDRoot err=%d root=%s\n", err, rootdevice);
+ 	if (err) {
+ 		printf("setconf: IOFindBSDRoot returned an error (%d);"
+ 		    "setting rootdevice to 'sd0a'.\n", err);     /* XXX DEBUG TEMP */
+diff --git a/bsd/pthread/nabu_pthread_init.c b/bsd/pthread/nabu_pthread_init.c
+--- a/bsd/pthread/nabu_pthread_init.c
++++ b/bsd/pthread/nabu_pthread_init.c
+@@ -1,5 +1,5 @@
+ /* Built-in provider: Apple libpthread-514.100.2, paired with xnu-8796.141.3. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_pthread_compat.h"
+ #include "nabu_libpthread/kern/kern_init.c"
+ 
+@@ -18,9 +18,9 @@
+ {
+     kern_return_t kr = nabu_pthread_start(NULL, NULL);
+     if (kr != KERN_SUCCESS || nabu_pthread_kern == NULL) {
+-        panic("NABU: pthread provider registration failed: %d", kr);
++        panic("NABU: pthread provider registration failed: %d", kr);
+     }
+-    kprintf("NABU pthread: libpthread-514.100.2 registered\n");
++    kprintf("NABU pthread: libpthread-514.100.2 registered\n");
+ }
+ STARTUP(EARLY_BOOT, STARTUP_RANK_SECOND, nabu_pthread_register);
+ #endif /* ARM64_BOARD_CONFIG_NABU */
+diff --git a/bsd/pthread/nabu_pthread_support.c b/bsd/pthread/nabu_pthread_support.c
+--- a/bsd/pthread/nabu_pthread_support.c
++++ b/bsd/pthread/nabu_pthread_support.c
+@@ -1,5 +1,5 @@
+ /* Built-in provider: Apple libpthread-514.100.2, paired with xnu-8796.141.3. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_pthread_compat.h"
+ #include "nabu_libpthread/kern/kern_support.c"
+ #endif /* ARM64_BOARD_CONFIG_NABU */
+diff --git a/bsd/pthread/nabu_pthread_synch.c b/bsd/pthread/nabu_pthread_synch.c
+--- a/bsd/pthread/nabu_pthread_synch.c
++++ b/bsd/pthread/nabu_pthread_synch.c
+@@ -1,5 +1,5 @@
+ /* Built-in provider: Apple libpthread-514.100.2, paired with xnu-8796.141.3. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_pthread_compat.h"
+ #include "nabu_libpthread/kern/kern_synch.c"
+ #endif /* ARM64_BOARD_CONFIG_NABU */
+diff --git a/config/MASTER.arm64.nabu b/config/MASTER.arm64.nabu
+new file mode 100644
+--- /dev/null
++++ b/config/MASTER.arm64.nabu
+@@ -0,0 +1,116 @@
++#
++# nabu (Xiaomi Pad 5, SM8150): copy of the nabu master config.
++# MASTER.arm64.MacOSX plus the open-source arm64 assembly and pmap
++# (nos_arm_asm, nos_arm_pmap). Apple's own SoC configs link those from the
++# KDK's closed lib<SOC>.os.<CONFIG>.a instead, which is arm64e and
++# Apple-silicon specific. kperf/kpc stay (xnu does not build without kperf);
++# osfmk/arm64/kpc.c is a stub with no hardware counters.
++#
++#
++# Mach Operating System
++# Copyright (c) 1986 Carnegie-Mellon University
++# Copyright 2001-2018 Apple Inc.
++#
++# All rights reserved.  The CMU software License Agreement
++# specifies the terms and conditions for use and redistribution.
++#  
++######################################################################
++#
++#  Master Apple configuration file (see the master machine independent
++#  configuration file for a description of the file format).
++#
++######################################################################
++#  
++#  Standard Apple OS Configurations:
++#  -------- ----- -- ---------------
++#
++#  KERNEL_BASE =    [ arm64 config_pmap_ppl medium msgb_large config_requires_u32_munging config_delay_idle_sleep config_proc_udata_storage config_uexc config_darkboot nos_arm_asm nos_arm_pmap ]
++#  KERNEL_RELEASE = [ KERNEL_BASE ]
++#  KERNEL_DEV =     [ KERNEL_BASE development mach_assert config_xnupost proc_ref_debug config_proc_resource_limits ]
++#  KERNEL_DEBUG =   [ KERNEL_BASE debug mach_assert config_xnupost config_waitq_stats config_workloop_debug config_proc_resource_limits ]
++#  BSD_BASE =       [ mach_bsd sysv_sem sysv_msg sysv_shm config_netboot config_imageboot psynch config_proc_uuid_policy config_coredump pgo config_personas ]
++#  BSD_RELEASE =    [ BSD_BASE ]
++#  BSD_DEV =        [ BSD_BASE config_vnguard ]
++#  BSD_DEBUG =      [ BSD_BASE config_vnguard ]
++#  FILESYS_BASE =   [ devfs fdesc fifo mockfs fs_compression config_protect config_mnt_rootsnap config_rosv_startup config_mount_vm config_mount_prebootrecovery config_basesystemroot config_fse quota namedstreams config_imgsrc_access config_triggers config_searchfs config_volfs config_appledouble nullfs bindfs config_mnt_suid config_firmlinks config_dataless_files config_union_mounts config_file_leases ]
++#  FILESYS_RELEASE= [ FILESYS_BASE ]
++#  FILESYS_DEV =    [ FILESYS_BASE config_iocount_trace ]
++#  FILESYS_DEBUG =  [ FILESYS_BASE config_iocount_trace ]
++#  NFS =            [ nfsserver ]
++#  SKYWALK_BASE =   [ skywalk config_nexus_user_pipe config_nexus_kernel_pipe config_nexus_monitor config_nexus_flowswitch config_nexus_netif ]
++#  SKYWALK_RELEASE = [ SKYWALK_BASE ]
++#  SKYWALK_DEV =    [ SKYWALK_BASE ]
++#  SKYWALK_DEBUG =  [ SKYWALK_BASE ]
++#  NETWORKING =     [ inet bpfilter dummynet traffic_mgt sendfile ah_all_crypto bond vlan gif stf ifnet_input_chk config_mbuf_jumbo if_bridge MULTIPATH if_fake remote_vif ]
++#  NETWORKING_RELEASE = [ NETWORKING ]
++#  NETWORKING_DEV = [ NETWORKING_RELEASE packet_mangler if_headless ]
++#  NETWORKING_DEBUG = [ NETWORKING_DEV ]
++#  VPN =            [ ipsec flow_divert necp content_filter ]
++#  PF =             [ pf pflog ]
++#  MULTIPATH =      [ multipath mptcp ]
++#if SOC_CONFIG_t8020 || SOC_IS_VIRTUALIZED
++#  HIBERNATION =    [ ]
++#else /*!(SOC_CONFIG_t8020 || SOC_IS_VIRTUALIZED)*/
++#  HIBERNATION =    [ ]
++#endif /*SOC_CONFIG_t8020 || SOC_IS_VIRTUALIZED*/
++#  IOKIT_BASE =     [ iokit iokitcpp no_kernel_hid config_sleep iokitstats HIBERNATION ]
++#  IOKIT_RELEASE =  [ IOKIT_BASE ]
++#  IOKIT_DEV =      [ IOKIT_BASE iotracking ]
++#  IOKIT_DEBUG =    [ IOKIT_BASE iotracking ]
++#  LIBKERN_BASE =   [ libkerncpp config_blocks config_kec_fips crypto_sha2 config_img4 ]
++#  LIBKERN_RELEASE =[ LIBKERN_BASE zlib ]
++#  LIBKERN_DEV =    [ LIBKERN_BASE zlib iotracking ]
++#  LIBKERN_DEBUG =  [ LIBKERN_BASE zlib iotracking ]
++#  PERF_DBG_BASE =  [ config_dtrace mach_kdp config_serial_kdp kdp_interactive_debugging config_kdp_coredump_encryption config_pervasive_energy PERFMON_BASE kperf kpc ]
++#  PERF_DBG_RELEASE=[ PERF_DBG_BASE ist_kdebug ]
++#  PERF_DBG_DEV =   [ PERF_DBG_BASE lock_stats zleaks alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace ]
++#  PERF_DBG_DEBUG = [ PERF_DBG_BASE lock_stats zleaks alternate_debugger sched_hygiene_debug config_debug_syscall_rejection config_iotrace ]
++#if SOC_IS_VIRTUALIZED
++#  PARAVIRT_BASE =  [ config_pv_ticket ]
++#else
++#  PARAVIRT_BASE =  [ ]
++#endif /*SOC_IS_VIRTUALIZED*/
++#  MACH_BASE =      [ mach config_ecc_logging vc_progress_white importance_inheritance config_atm config_coalitions config_iosched config_sysdiagnose config_telemetry config_mach_bridge_recv_time config_quiesce_counter config_arm_pfz config_user_notification phys_write_acct config_service_port_info config_voucher_deprecated PARAVIRT_BASE config_ledger_interval_max ]
++#  MACH_RELEASE =   [ MACH_BASE ]
++#  MACH_DEV =       [ MACH_BASE config_io_accounting importance_trace ]
++#  MACH_DEBUG =     [ MACH_BASE config_io_accounting importance_trace importance_debug ]
++#  SCHED_BASE =     [ config_sched_traditional config_sched_multiq config_sched_deferred_ast config_clutch config_sched_sfi config_sched_auto_join config_preadopt_tg ]
++#  SCHED_RELEASE =  [ SCHED_BASE ]
++#  SCHED_DEV =      [ SCHED_BASE ]
++#  SCHED_DEBUG =    [ SCHED_BASE config_sched_grrr config_sched_proto ]
++#  VM_BASE =        [ vm_pressure_events memorystatus config_code_decryption encrypted_swap config_deferred_reclaim ]
++#  VM_RELEASE =     [ VM_BASE ]
++#  VM_DEV =         [ VM_BASE dynamic_codesigning pgzalloc ]
++#  VM_DEBUG =       [ VM_BASE dynamic_codesigning pgzalloc ]
++#  VM_KASAN =       [ VM_BASE dynamic_codesigning config_kasan config_ubsan config_kcov config_ksancov kernel_tbi ]
++#  SECURITY =       [ config_macf config_audit kernel_integrity config_csr config_csr_from_dt config_setuid config_kas_info config_secure_bsd_root config_arcade config_supplemental_signatures second_static_trust_cache reslide_shared_cache ]
++#  BASE =           [ PF VPN SECURITY NFS ]
++#  RELEASE =        [ BASE KERNEL_RELEASE BSD_RELEASE FILESYS_RELEASE SKYWALK_RELEASE NETWORKING_RELEASE IOKIT_RELEASE LIBKERN_RELEASE    PERF_DBG_RELEASE MACH_RELEASE SCHED_RELEASE VM_RELEASE ]
++#  DEVELOPMENT =    [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV        PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_DEV     ]
++#  DEBUG =          [ BASE KERNEL_DEBUG   BSD_DEBUG   FILESYS_DEBUG   SKYWALK_DEBUG   NETWORKING_DEBUG   IOKIT_DEBUG   LIBKERN_DEBUG      PERF_DBG_DEBUG   MACH_DEBUG   SCHED_DEBUG   VM_DEBUG   ]
++#  KASAN =          [ BASE KERNEL_DEV     BSD_DEV     FILESYS_DEV     SKYWALK_DEV     NETWORKING_DEV     IOKIT_DEV     LIBKERN_DEV        PERF_DBG_DEV     MACH_DEV     SCHED_DEV     VM_KASAN   ]
++#
++######################################################################
++#
++machine		"arm64"						# <arm64>
++
++makeoptions	OSFMK_MACHINE = "arm64"				# <mach>
++
++options		COUNT_SYSCALLS		# count bsd system calls 	# <countcalls>
++options     TRASH_VFP_ON_SAVE   # <debug,trash_vfp>
++options		ALTERNATE_DEBUGGER	# <alternate_debugger>
++
++options   CONFIG_VNODES=1024		# <xsmall>
++
++options   CONFIG_FREEZE_SUSPENDED_MIN=4		# <xsmall>
++
++options	  CONFIG_MACH_APPROXIMATE_TIME
++
++options   CONFIG_KERNEL_INTEGRITY		# <kernel_integrity>
++
++options CONFIG_MACF_LAZY_VNODE_LABELS   # Turn on labels, don't preallocate
++
++options CONFIG_HYPERVISOR_PUBLIC   # unrestricted entitlement for hypervisor
++
++options   CONFIG_RESLIDE_SHARED_CACHE		# <reslide_shared_cache>
++options   CONFIG_KERNEL_TBI		# <kernel_tbi>
+diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -5126,7 +5126,7 @@
+ 	bool                wasHiding;
+ 
+ 	iomediaClass = OSMetaClass::getMetaClassWithName(gIOMediaKey);
+-#if !defined(ARM64_BOARD_CONFIG_NABU)
++#if !defined(ARM64_BOARD_CONFIG_NABU) && !defined(ARM64_BOARD_CONFIG_NABU)
+ 	assert(iomediaClass);
+ #endif
+ 
+@@ -5137,8 +5137,8 @@
+ 	}
+ 	UNLOCKNOTIFY();
+ 
+-#if defined(ARM64_BOARD_CONFIG_NABU)
+-	/* NABU has no IOStorageFamily: without the IOMedia class no media exists to unhide. */
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
++	/* NABU/NABU have no IOStorageFamily: without IOMedia no media exists to unhide. */
+ 	if (!iomediaClass) {
+ 		wasHiding = false;
+ 	}
+@@ -5188,10 +5188,11 @@
+ 	bool unhide;
+ 
+ 	ioblockstoragedriverClass = OSMetaClass::getMetaClassWithName(gIOBlockStorageDriverKey);
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ 	/*
+-	 * NABU has no IOStorageFamily, so no service can be a block storage
+-	 * driver: the root (e.g. a RAM disk) is not block media, as for image boot.
++	 * NABU/NABU have no IOStorageFamily, so no service can be a block
++	 * storage driver: the root (e.g. a RAM disk or the BSD-only UFS device)
++	 * is not block media, as for image boot.
+ 	 */
+ 	if (!ioblockstoragedriverClass) {
+ 		root = NULL;
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -34,24 +34,38 @@
+ 
+ const char * gIOKernelConfigTables =
+     "("
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+     "   {"
+     "     'IOClass'         = NabuPlatformExpert;"
+     "     'IOProviderClass' = IOPlatformExpertDevice;"
+-    "     'IONameMatch'     = 'xiaomi,nabu';"
++    "     'IONameMatch'     = '"
++#if defined(ARM64_BOARD_CONFIG_NABU)
++    "xiaomi,nabu"
++#else
++    "xiaomi,nabu"
++#endif
++    "';"
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
+     "   {"
+     "     'IOClass'         = NabuCPU;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+-    "     'IONameMatch'     = 'qcom,kryo470';"
++    "     'IONameMatch'     = '"
++#if defined(ARM64_BOARD_CONFIG_NABU)
++    "qcom,kryo485"
++#else
++    "qcom,kryo470"
++#endif
++    "';"
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
++#if !defined(ARM64_BOARD_CONFIG_NABU)
+     "   {"
+     "     'IOClass'         = AppleKeyStore;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = AppleKeyStore;"
+     "   },"
++#endif
+     "   {"
+     "     'IOClass'         = IOWatchdog;"
+     "     'IOProviderClass' = IOResources;"
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -766,14 +766,17 @@
+ 		}
+ 	}
+ 
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ //
+-//	NABU: root on a GPT partition of the internal UFS (bsd/dev/nabu_ufs.c)
++//	NABU/NABU: root on a GPT partition of the internal UFS
++//	(bsd/dev/nabu_ufs.c)
+ //
+ 	if (strcmp(rdBootVar, "ufsroot0") == 0) {
+ 		extern int nabu_ufs_rootdev(dev_t *dev);
++		IOLog("NABU: IOFindBSDRoot UFS branch, calling nabu_ufs_rootdev\n");
+ 		OSSafeReleaseNULL(matching);
+ 		int ufs_error = nabu_ufs_rootdev(root);
++		IOLog("NABU: nabu_ufs_rootdev returned %d\n", ufs_error);
+ 		if (ufs_error) {
+ 			panic("IOFindBSDRoot: NABU UFS root %s unavailable: %d", rdBootVar, ufs_error);
+ 		}
+diff --git a/libkern/conf/Makefile.template b/libkern/conf/Makefile.template
+--- a/libkern/conf/Makefile.template
++++ b/libkern/conf/Makefile.template
+@@ -19,7 +19,7 @@
+ CFLAGS+= -include meta_features.h -DLIBKERN_KERNEL_PRIVATE -DOSALLOCDEBUG=1
+ SFLAGS+= -include meta_features.h
+ 
+-ifeq ($(CURRENT_MACHINE_CONFIG),NABU)
++ifneq ($(filter $(CURRENT_MACHINE_CONFIG),NABU NABU),)
+ NABU_AES_ROOT = $(SRCROOT)/libkern/crypto/nabu_bearssl
+ NABU_AES_INC = -I$(NABU_AES_ROOT)/inc -I$(NABU_AES_ROOT)/src
+ nabu_aes.o_INCFLAGS = $(NABU_AES_INC)
+diff --git a/libkern/crypto/corecrypto_aes.c b/libkern/crypto/corecrypto_aes.c
+--- a/libkern/crypto/corecrypto_aes.c
++++ b/libkern/crypto/corecrypto_aes.c
+@@ -32,7 +32,7 @@
+ #include <corecrypto/ccaes.h>
+ #include <kern/debug.h>
+ 
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ /* NABU has a built-in portable AES provider for the legacy CBC/ECB API. */
+ extern const struct ccmode_cbc nabu_aes_cbc_encrypt;
+ extern const struct ccmode_cbc nabu_aes_cbc_decrypt;
+diff --git a/libkern/crypto/corecrypto_md5.c b/libkern/crypto/corecrypto_md5.c
+--- a/libkern/crypto/corecrypto_md5.c
++++ b/libkern/crypto/corecrypto_md5.c
+@@ -17,7 +17,7 @@
+ }
+ 
+ /* Copy a ccdigest ctx into a legacy MD5 context */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ /*
+  * NABU has no corecrypto kext (g_crypto_funcs stays NULL). MD5 uses
+  * BearSSL's portable implementation (libkern/crypto/nabu_md5.c), with
+@@ -71,7 +71,7 @@
+ 	br_md5_out(&br_ctx, digest);
+ }
+ 
+-#else /* !ARM64_BOARD_CONFIG_NABU */
++#else /* !ARM64_BOARD_CONFIG_NABU || defined(ARM64_BOARD_CONFIG_NABU) */
+ 
+ static void
+ DiToMD5(const struct ccdigest_info *di, struct ccdigest_ctx *di_ctx, MD5_CTX *md5_ctx)
+@@ -125,4 +125,4 @@
+ 	ccdigest_final(di, di_ctx, digest);
+ }
+ 
+-#endif /* !ARM64_BOARD_CONFIG_NABU */
++#endif /* !ARM64_BOARD_CONFIG_NABU || defined(ARM64_BOARD_CONFIG_NABU) */
+diff --git a/libkern/crypto/corecrypto_sha1.c b/libkern/crypto/corecrypto_sha1.c
+--- a/libkern/crypto/corecrypto_sha1.c
++++ b/libkern/crypto/corecrypto_sha1.c
+@@ -16,7 +16,7 @@
+ 	ctx->c.b64[0] = count;
+ }
+ 
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ /*
+  * NABU has no corecrypto kext (g_crypto_funcs stays NULL). SHA-1 uses
+  * BearSSL's portable implementation (libkern/crypto/nabu_sha1.c), with
+@@ -70,7 +70,7 @@
+ 	br_sha1_out(&br_ctx, digest);
+ }
+ 
+-#else /* !ARM64_BOARD_CONFIG_NABU */
++#else /* !ARM64_BOARD_CONFIG_NABU || defined(ARM64_BOARD_CONFIG_NABU) */
+ 
+ /* Copy a ccdigest ctx into a legacy SHA1 context */
+ static void
+@@ -125,7 +125,7 @@
+ 	ccdigest_final(di, di_ctx, digest);
+ }
+ 
+-#endif /* !ARM64_BOARD_CONFIG_NABU */
++#endif /* !ARM64_BOARD_CONFIG_NABU || defined(ARM64_BOARD_CONFIG_NABU) */
+ 
+ /* This is not publicised in header, but exported in libkern.exports */
+ void SHA1Final_r(SHA1_CTX *context, void *digest);
+diff --git a/libkern/crypto/corecrypto_sha2.c b/libkern/crypto/corecrypto_sha2.c
+--- a/libkern/crypto/corecrypto_sha2.c
++++ b/libkern/crypto/corecrypto_sha2.c
+@@ -34,7 +34,7 @@
+ 
+ #if defined(CRYPTO_SHA2)
+ 
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ /*
+  * NABU has no corecrypto kext, so g_crypto_funcs stays NULL. SHA-256 uses
+  * XNU's built-in implementation directly, as the NABU PRNG does; this also
+@@ -84,7 +84,7 @@
+ 	ccdigest_final(di, ctx->ctx, digest);
+ }
+ 
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/inc/bearssl_hash.h"
+ 
+ _Static_assert(sizeof(br_sha384_context) <= sizeof(SHA512_CTX),
+@@ -127,7 +127,7 @@
+ 	br_sha512_out(BR_CTX(ctx), digest);
+ }
+ 
+-#else /* !ARM64_BOARD_CONFIG_NABU */
++#else /* !ARM64_BOARD_CONFIG_NABU || defined(ARM64_BOARD_CONFIG_NABU) */
+ 
+ void
+ SHA384_Init(SHA384_CTX *ctx)
+@@ -194,7 +194,7 @@
+ 	ccdigest_final(di, ctx->ctx, digest);
+ }
+ 
+-#endif /* !ARM64_BOARD_CONFIG_NABU */
++#endif /* !ARM64_BOARD_CONFIG_NABU || defined(ARM64_BOARD_CONFIG_NABU) */
+ 
+ #else
+ 
+diff --git a/libkern/crypto/nabu_aes.c b/libkern/crypto/nabu_aes.c
+--- a/libkern/crypto/nabu_aes.c
++++ b/libkern/crypto/nabu_aes.c
+@@ -4,7 +4,7 @@
+  * No heap, SIMD or CPU crypto extension is needed. Contexts can be copied:
+  * their only pointer is the immutable BearSSL class descriptor.
+  */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include <libkern/libkern.h>
+ #include <libkern/crypto/aes.h>
+ #include <corecrypto/ccmode.h>
+@@ -108,4 +108,4 @@
+     .init = nabu_aes_decrypt_init,
+     .cbc = nabu_aes_decrypt_cbc,
+ };
+-#endif /* ARM64_BOARD_CONFIG_NABU */
++#endif /* ARM64_BOARD_CONFIG_NABU || defined(ARM64_BOARD_CONFIG_NABU) */
+diff --git a/libkern/crypto/nabu_aes_ct.c b/libkern/crypto/nabu_aes_ct.c
+--- a/libkern/crypto/nabu_aes_ct.c
++++ b/libkern/crypto/nabu_aes_ct.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/symcipher/aes_ct.c"
+ #endif
+diff --git a/libkern/crypto/nabu_aes_ct_cbcdec.c b/libkern/crypto/nabu_aes_ct_cbcdec.c
+--- a/libkern/crypto/nabu_aes_ct_cbcdec.c
++++ b/libkern/crypto/nabu_aes_ct_cbcdec.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/symcipher/aes_ct_cbcdec.c"
+ #endif
+diff --git a/libkern/crypto/nabu_aes_ct_cbcenc.c b/libkern/crypto/nabu_aes_ct_cbcenc.c
+--- a/libkern/crypto/nabu_aes_ct_cbcenc.c
++++ b/libkern/crypto/nabu_aes_ct_cbcenc.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/symcipher/aes_ct_cbcenc.c"
+ #endif
+diff --git a/libkern/crypto/nabu_aes_ct_dec.c b/libkern/crypto/nabu_aes_ct_dec.c
+--- a/libkern/crypto/nabu_aes_ct_dec.c
++++ b/libkern/crypto/nabu_aes_ct_dec.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/symcipher/aes_ct_dec.c"
+ #endif
+diff --git a/libkern/crypto/nabu_aes_ct_enc.c b/libkern/crypto/nabu_aes_ct_enc.c
+--- a/libkern/crypto/nabu_aes_ct_enc.c
++++ b/libkern/crypto/nabu_aes_ct_enc.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/symcipher/aes_ct_enc.c"
+ #endif
+diff --git a/libkern/crypto/nabu_dec32be.c b/libkern/crypto/nabu_dec32be.c
+--- a/libkern/crypto/nabu_dec32be.c
++++ b/libkern/crypto/nabu_dec32be.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/codec/dec32be.c"
+ #endif
+diff --git a/libkern/crypto/nabu_dec32le.c b/libkern/crypto/nabu_dec32le.c
+--- a/libkern/crypto/nabu_dec32le.c
++++ b/libkern/crypto/nabu_dec32le.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/codec/dec32le.c"
+ #endif
+diff --git a/libkern/crypto/nabu_dec64be.c b/libkern/crypto/nabu_dec64be.c
+--- a/libkern/crypto/nabu_dec64be.c
++++ b/libkern/crypto/nabu_dec64be.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/codec/dec64be.c"
+ #endif
+diff --git a/libkern/crypto/nabu_enc32be.c b/libkern/crypto/nabu_enc32be.c
+--- a/libkern/crypto/nabu_enc32be.c
++++ b/libkern/crypto/nabu_enc32be.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/codec/enc32be.c"
+ #endif
+diff --git a/libkern/crypto/nabu_enc32le.c b/libkern/crypto/nabu_enc32le.c
+--- a/libkern/crypto/nabu_enc32le.c
++++ b/libkern/crypto/nabu_enc32le.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/codec/enc32le.c"
+ #endif
+diff --git a/libkern/crypto/nabu_enc64be.c b/libkern/crypto/nabu_enc64be.c
+--- a/libkern/crypto/nabu_enc64be.c
++++ b/libkern/crypto/nabu_enc64be.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/codec/enc64be.c"
+ #endif
+diff --git a/libkern/crypto/nabu_md5.c b/libkern/crypto/nabu_md5.c
+--- a/libkern/crypto/nabu_md5.c
++++ b/libkern/crypto/nabu_md5.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/hash/md5.c"
+ #endif
+diff --git a/libkern/crypto/nabu_sha1.c b/libkern/crypto/nabu_sha1.c
+--- a/libkern/crypto/nabu_sha1.c
++++ b/libkern/crypto/nabu_sha1.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/hash/sha1.c"
+ #endif
+diff --git a/libkern/crypto/nabu_sha2big.c b/libkern/crypto/nabu_sha2big.c
+--- a/libkern/crypto/nabu_sha2big.c
++++ b/libkern/crypto/nabu_sha2big.c
+@@ -1,4 +1,4 @@
+ /* BearSSL sources are fetched at an immutable commit by 0020-stage-bearssl.sh. */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include "nabu_bearssl/src/hash/sha2big.c"
+ #endif
+diff --git a/makedefs/MakeInc.cmd b/makedefs/MakeInc.cmd
+--- a/makedefs/MakeInc.cmd
++++ b/makedefs/MakeInc.cmd
+@@ -187,10 +187,10 @@
+ 	export CXX := $(shell $(XCRUN) -sdk $(SDKROOT) -find clang++)
+ endif
+ ifeq ($(origin MIG),undefined)
+-	export MIG := $(shell $(XCRUN) -sdk $(SDKROOT) -find mig)
++	export MIG := $(shell find $(FAKEROOT_DIR) -name "mig")
+ endif
+ ifeq ($(origin MIGCOM),undefined)
+-	export MIGCOM := $(shell $(XCRUN) -sdk $(SDKROOT) -find migcom)
++	export MIGCOM := $(shell find $(FAKEROOT_DIR) -name "migcom")
+ endif
+ ifeq ($(origin MIGCC),undefined)
+ 	export MIGCC := $(CC)
+diff --git a/makedefs/MakeInc.def b/makedefs/MakeInc.def
+--- a/makedefs/MakeInc.def
++++ b/makedefs/MakeInc.def
+@@ -29,7 +29,7 @@
+ else ifneq ($(findstring _host,$(RC_ProjectName)),)
+ SUPPORTED_ARM64_MACHINE_CONFIGS = NONE
+ else
+-SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 T6000 T8101 T8103 VMAPPLE NABU
++SUPPORTED_ARM64_MACHINE_CONFIGS = BCM2837 T6000 T8101 T8103 VMAPPLE NABU NABU
+ 
+ endif
+ 
+@@ -62,6 +62,7 @@
+ MACHINE_FLAGS_ARM64_VMAPPLE = -DARM64_BOARD_CONFIG_VMAPPLE              -march=armv8.5a
+ MACHINE_FLAGS_ARM64_BCM2837 = -DARM64_BOARD_CONFIG_BCM2837
+ MACHINE_FLAGS_ARM64_NABU = -DARM64_BOARD_CONFIG_NABU                -march=armv8.2-a+crypto
++MACHINE_FLAGS_ARM64_NABU = -DARM64_BOARD_CONFIG_NABU                  -march=armv8.2-a+crypto
+ 
+ 
+ #
+@@ -260,8 +261,9 @@
+ # Without embdedded device map, use a default arch string
+ export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := $(shell echo $(CURRENT_ARCH_CONFIG) | tr A-Z a-z)
+ ifneq ($(filter arm64,$(ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG)),)
+-# nabu's Cortex-A76/A55 have no pointer authentication: stay plain arm64
+-ifneq ($(CURRENT_MACHINE_CONFIG),NABU)
++# nabu/nabu Cortex-A76/A55 have no pointer authentication: stay plain arm64
++ifneq ($(filter $(CURRENT_MACHINE_CONFIG),NABU NABU),)
++else
+ export ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG := arm64e
+ endif
+ endif
+@@ -645,7 +647,7 @@
+ 	-Wl,-headerpad,152
+ 
+ # LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -lfirehose_kernel
+-LDFLAGS_KERNEL_SDK	= -L$(SDKROOT)/usr/local/lib/kernel -L$(SDKROOT)/usr/local/lib/kernel/platform
++LDFLAGS_KERNEL_SDK	= -L$(FAKEROOT_DIR)/usr/local/lib/kernel -lfirehose_kernel
+ 
+ LDFLAGS_KERNEL_RELEASE	=
+ LDFLAGS_KERNEL_DEVELOPMENT =
+@@ -887,7 +889,7 @@
+ INCFLAGS_EXTERN	= -I$(SRCROOT)/EXTERNAL_HEADERS
+ INCFLAGS_GEN	= -I$(SRCROOT)/$(COMPONENT) -I$(OBJROOT)/EXPORT_HDRS/$(COMPONENT)
+ INCFLAGS_LOCAL	= -I.
+-INCFLAGS_SDK	= -I$(SDKROOT)/usr/local/include/kernel
++INCFLAGS_SDK	= -I$(FAKEROOT_DIR)/usr/local/include/kernel
+ INCFLAGS_PLATFORM = -I$(SDKROOT)/$(KPINCDIR)/platform
+ 
+ INCFLAGS	= $(INCFLAGS_LOCAL) $(INCFLAGS_GEN) $(INCFLAGS_IMPORT) $(INCFLAGS_EXTERN) $(INCFLAGS_MAKEFILE) $(INCFLAGS_SDK) $(INCFLAGS_PLATFORM)
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -515,10 +515,10 @@
+ 
+ #if defined(NABU)
+ 	/* Stage 0: white 64x32 band, no stack or page tables needed. */
+-	MOV64	x0, (0x9c000000 + 2368 * 4320)
++	MOV64	x0, (0x9c000000 + 2528 * 6400)
+ 	mov		w1, #-1
+ 	mov		x2, #32
+-	mov		x4, #4320
++	mov		x4, #6400
+ Lnabu_mark_row:
+ 	mov		x3, #64
+ 	mov		x5, x0
+diff --git a/osfmk/arm64/nabu_early.c b/osfmk/arm64/nabu_early.c
+--- a/osfmk/arm64/nabu_early.c
++++ b/osfmk/arm64/nabu_early.c
+@@ -13,9 +13,9 @@
+ 
+ static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
+ #define EARLY_FB early_fb
+-#define EARLY_WIDTH 1080u
+-#define EARLY_HEIGHT 2400u
+-#define EARLY_STRIDE (4320u / 4)
++#define EARLY_WIDTH 1600u
++#define EARLY_HEIGHT 2560u
++#define EARLY_STRIDE (6400u / 4)
+ #define EARLY_SCALE 2u
+ #define EARLY_CELL_W (8u * EARLY_SCALE)
+ #define EARLY_CELL_H (16u * EARLY_SCALE)
+@@ -99,7 +99,7 @@
+ 		}
+ 	}
+ 	__asm__ volatile("dsb sy" ::: "memory");
+-	nabu_early_string("NABU EARLY ");
++	nabu_early_string("NABU EARLY ");
+ 	if (stage >= 10) {
+ 		nabu_early_putc((char)('0' + stage / 10));
+ 	}
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -266,7 +266,7 @@
+  *             waiting for an interrupt when the hardware device isn't ready
+  * @param size The number of characters to print to the console.
+  */
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ extern void nabu_log_append(const char *c, int size);  /* bsd/dev/nabu_ufs.c */
+ /*
+  * Set by AppleCLCD (boot-arg nabufb_noconsole=1) once the GUI presents:
+@@ -281,7 +281,7 @@
+ {
+ 	extern int disableConsoleOutput;
+ 
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ 	nabu_log_append(c, size);
+ 	if (nabu_console_muted && !panic_active()) {
+ 		return;
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -820,7 +820,7 @@
+ 	return exception_triage_thread(exception, code, codeCnt, thread);
+ }
+ 
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ #include <vm/vm_shared_region.h>
+ #include <arm/thread.h>
+ 
+diff --git a/pexpert/arm/pe_fiq.c b/pexpert/arm/pe_fiq.c
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -116,7 +116,7 @@
+ 			}
+ 			nabu_vtimer_intid = intid;
+ 		}
+-		kprintf("NABU GIC: virtual timer INTID %u\n", nabu_vtimer_intid);
++		kprintf("NABU GIC: virtual timer INTID %u\n", nabu_vtimer_intid);
+ #endif
+ 
+ 		vm_offset_t soc_base_phys = pe_arm_get_soc_base_phys();
+diff --git a/pexpert/pexpert/arm/protos.h b/pexpert/pexpert/arm/protos.h
+--- a/pexpert/pexpert/arm/protos.h
++++ b/pexpert/pexpert/arm/protos.h
+@@ -36,7 +36,7 @@
+ int uart_getc(void);
+ 
+ void pe_init_fiq(void);
+-#if defined(ARM64_BOARD_CONFIG_NABU)
++#if defined(ARM64_BOARD_CONFIG_NABU) || defined(ARM64_BOARD_CONFIG_NABU)
+ extern uint32_t nabu_vtimer_intid;
+ #endif
+ 
+diff --git a/pexpert/pexpert/arm64/board_config.h b/pexpert/pexpert/arm64/board_config.h
+--- a/pexpert/pexpert/arm64/board_config.h
++++ b/pexpert/pexpert/arm64/board_config.h
+@@ -108,6 +108,17 @@
+ 
+ #endif  /* ARM64_BOARD_CONFIG_NABU */
+ 
++#ifdef ARM64_BOARD_CONFIG_NABU
++#include <pexpert/arm64/NABU.h>
++
++#define MAX_L2_CLINE                   6
++#define MAX_CPUS                       8
++#define MAX_CPU_CLUSTERS               1
++
++#define CORE_NCTRS                     8 /* Placeholder; KPC is not enabled for this target */
++
++#endif  /* ARM64_BOARD_CONFIG_NABU */
++
+ #ifdef ARM64_BOARD_CONFIG_VMAPPLE
+ #include <pexpert/arm64/VMAPPLE.h>
+ 
