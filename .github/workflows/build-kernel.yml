@@ -115,7 +115,7 @@ jobs:
 
       - name: Inject early checkpoint marks (diagnostic)
         run: |
-          bash "$GITHUB_WORKSPACE/scripts/inject-early-marks.sh" "$GITHUB_WORKSPACE/UniXNU/out/nabu/tree/xnu"
+          bash "$GITHUB_WORKSPACE/scripts/inject-early-marks.sh" "$GITHUB_WORKSPACE/UniXNU/out/nabu/tree/refer/xnu"
 
       - name: Build kernel
 
@@ -140,3 +140,4 @@ jobs:
             UniXNU/out/nabu/kernel/
             UniXNU/out/nabu/logs/
           if-no-files-found: warn
+
