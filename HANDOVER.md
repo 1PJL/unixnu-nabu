@@ -169,12 +169,27 @@ else if (RamdiskOffset != MAX_UINTN) { Status = EFI_UNSUPPORTED; goto Fail; }
 
 **症状特征**：有日志、有屏幕、无方块，且加标记前后行为不变（因为标记本身就是死因）。
 
-✅ **修法（UniXNU `8272559`）**：
+✅ **修法（UniXNU `9ad570c`）**：
 - `nabu_mark_init()` 只清状态，**不碰 fb**
 - `NABU_MARK(n)` 只把命中记进 RAM 位图 `g_hits`（RAM 必然可写）
-- `nabu_mark_rebind()` 放在 `PE_create_console()` **之后**——此时 `vcattach` 已把
-  fb 映射好、`PE_state.video.v_baseAddr` 是**内核虚拟地址**，
-  一次性把此前所有命中回放到屏幕
+- `nabu_mark_rebind()` 挂在 **`vcattach()` 的末尾**，一次性把命中回放到屏幕
+
+> ⚠️ **映射点不是 `PE_create_console()`！**（第一版就错在这里，白刷了两轮）
+> - `vcattach()` 由 **`PE_init_printf(TRUE)`** 调起（`pexpert/gen/pe_gen.c:135-140`）
+> - 而 `arm_init` 里只有 `PE_init_printf(FALSE)` → **`arm_init` 期间 fb 从未被映射**
+> - 真正的映射在 `vcattach` → `initialize_screen(NULL, kPEAcquireScreen)`
+>   → `ml_io_map_unmappable(...)`（`osfmk/console/video_console.c:2880`）
+>
+> 所以注入点在 `vcattach` 收尾的 `}` 之前，并且加了一道**内核 VA 守卫**：
+> ```c
+> if ((unsigned long)PE_state.video.v_baseAddr >= 0xFFFFFFF000000000UL) {
+>     nabu_mark_rebind((const unsigned long *)&PE_state.video);
+> }
+> ```
+> 地址还不像内核 VA 就**跳过**，猜错也不会 fault。
+>
+> **副产品结论**：既然 rebind（在 console 之后）曾把内核打死，说明**内核确实能跑到
+> `PE_create_console` 之后**——比此前 HANDOVER 记录的"死在 `PE_create_console` 之前"远得多。
 
 ### 坑 12：屏幕顶部绿条**不是** "kernel entry code ran"
 `DarwinBoot.c` 里那句提示是错的。证据：
@@ -344,29 +359,53 @@ cd /root/Mu-Silicium && python3 build_uefi.py -d nabu -r DEBUG
 | 5 | 重编固件（修 Video）→ 重打 cust payload → 刷 + 启 → 数方块 | 🔄 第 1 轮已刷：方块 **0**（见下），已下沉 MARK1 等第 3 轮内核 |
 | 6 | 若方块 0：改"写可写 RAM + DarwinBoot 回读" | ⬜ 条件触发 |
 
-### 第 5 步实测（第 1 轮刷机，固件已修 + 内核含 MARK1–4）
-真机屏幕实拍读出的关键行：
-```
-DB1 kernel read  Success size=0x3345000
-DB2 kernel parse Success
-DB3 adt read     Success size=0x330C
-DB4 adt ok win=0x130000000 keep=0 rd=ffffffffffffffff
-DARWINBOOT: video base=0x50000000 display=1 row=6400 width=1600 height=2560 depth=32
-DARWINBOOT: inputs validated; exiting boot services
-```
-**结论（三条）**：
-1. ✅ **Video 布局修复在硬件上生效**：`display=1 row=6400 width=1600 height=2560 depth=32`
-   —— 正是 `struct Boot_Video` 的正确顺序（旧固件这里会打印 `display=6400`）。
-2. ✅ **内核入口汇编跑过了**：屏幕顶部有 BootShim 的**绿色横条**
-   （BootShim 提示语：`A green bar across the top means the kernel entry code ran`）。
-3. ❌ **方块数 = 0**：UEFI 菜单与日志文字**完好无损**，说明内核一次都没写过帧缓冲。
+### 第 5 步实测（真机逐轮）
 
-⇒ 死亡点比原 MARK1 更早。`arm_init` 在 `PE_init_platform` 之前还有
-`arm_setup_pre_sign()` → `arm_slide_rebase_and_sign_image()`（JOP rebase+sign）
-→ `cpu_data_init()`，原 MARK1 插在这些之后，**盲区就在这段**。
+| 轮次 | 内核侧改动 | 屏幕结果 | 结论 |
+|---|---|---|---|
+| 1 | MARK1–4，直接写物理 fb | **0 块** | 探针自己 fault（fb 未映射）|
+| 2 | MARK1 下沉到 `arm_init` 入口 | 0 块 | 同上 |
+| 3 | 早期只记 RAM，`PE_create_console` 后 rebind | 0 块 | 这时 fb 仍未映射 |
+| 4 | rebind 挂到 `vcattach` 末尾 | 0 块 | 内核没走到 `vcattach` |
+| 5 | **`nabu_mark_map()` 用 `ml_io_map_unmappable` 自建映射** | **5 块** ✅ | `arm_init` 主干跑通 |
+| 6 | 实时重画 + MARK7（`machine_startup` 前）+ MARK8/9（`kernel_bootstrap`）| **8 块** ✅✅ | **越过 `machine_startup`，进了 `kernel_bootstrap()`** |
 
-**已采取**：MARK1 下沉到 `arm_init` 的**第一条语句之前**，并把标记扩成 5 级
-（见上面 v2 方块表）。第二轮只需再刷一次内核（固件不用动）。
+**第 6 轮的关键判读**：8 块 = MARK1–8 全部命中，即
+`arm_init` 完整跑完 → `machine_startup(args)` → 进入 `kernel_bootstrap()`。
+但第 9 块（`PE_init_iokit()` 之后）没有出现，且**屏上没有内核文字** ——
+⇒ 死亡点锁定在 **`PE_init_iokit()` 内部**，也就是 `PE_init_printf(TRUE)` → `vcattach`
+→ `initialize_screen(NULL, kPEAcquireScreen)` 这条 console 初始化链路上。
+
+> ⚠️ **这彻底推翻了"内核在 `PE_create_console` 之前就静默死亡"的旧结论。**
+> 内核实际能跑到 `kernel_bootstrap`，之前看不到任何输出，纯粹是
+> **没人给内核早期映射显存**（见坑 11）。
+
+**已采取**：新增 4 个探针把 `PE_init_iokit` 内部切开（UniXNU `cb2a921`）：
+```
+10 = PE_init_iokit 入口
+11 = vcattach 入口
+12 = initialize_screen(NULL, kPEAcquireScreen) 之后
+13 = PE_init_printf(TRUE) 之后
+```
+
+方块语义（v4：实时重画，13 个槽位）：
+
+> ⚠️ 绿条不是进度信号（见坑 12）。只数方块。
+> 方块会在每次命中时**立刻刷新**，所以屏幕显示的就是内核的当前最新位置。
+
+| 方块数 | 最远到达 |
+|---|---|
+| 0 | `arm_init` 早期（或 `nabu_mark_map` 之前）|
+| 5 | 第二次 `PE_init_platform` 之后 |
+| 6 | `arm_vm_init` + 自映射成功 |
+| 7 | `machine_startup(args)` 之前 → **`arm_init` 跑完** |
+| 8 | 进入 `kernel_bootstrap()` |
+| 9 | 过了 `PE_init_iokit()` |
+| 10 | 进入 `PE_init_iokit()` |
+| 11 | 进入 `vcattach()` |
+| 12 | `initialize_screen(kPEAcquireScreen)` 之后 |
+| 13 | `PE_init_printf(TRUE)` 之后 → **console 完全就绪** |
+| 附加红块 | 右上角独立红块 = Video 布局/深度可疑（固件没生效）|
 
 ### 第 4 步验证结果（run `39612555624`，success）
 ```
