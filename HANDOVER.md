@@ -161,6 +161,38 @@ else if (RamdiskOffset != MAX_UINTN) { Status = EFI_UNSUPPORTED; goto Fail; }
 > ⇒ **结论：上游 HEAD 的 DarwinBoot 就是对的。不需要 patch、不需要 fork。**
 > 要做的只是"别再按数组顺序改它"。重编固件后 `Video` 布局即与内核一致。
 
+### 坑 11：内核早期**不能**写帧缓冲（探针曾经自己把内核打死）
+`ExitBootServices` 之后帧缓冲**仍然是可写可见的**（已用 DarwinBoot 双色探针证明，见下），
+但那是**在 UEFI 的页表下**。内核 `start.s` 之后用的是内核自己的页表，`0x50000000`
+这个**物理地址**在内核页表里没有映射 —— 于是 `arm_init` 里那次写**直接 fault**，
+内核就地死亡，屏幕保持原样，看起来和"内核没跑"一模一样。
+
+**症状特征**：有日志、有屏幕、无方块，且加标记前后行为不变（因为标记本身就是死因）。
+
+✅ **修法（UniXNU `8272559`）**：
+- `nabu_mark_init()` 只清状态，**不碰 fb**
+- `NABU_MARK(n)` 只把命中记进 RAM 位图 `g_hits`（RAM 必然可写）
+- `nabu_mark_rebind()` 放在 `PE_create_console()` **之后**——此时 `vcattach` 已把
+  fb 映射好、`PE_state.video.v_baseAddr` 是**内核虚拟地址**，
+  一次性把此前所有命中回放到屏幕
+
+### 坑 12：屏幕顶部绿条**不是** "kernel entry code ran"
+`DarwinBoot.c` 里那句提示是错的。证据：
+1. `BootShim.S` 全文没有画绿条的代码；Mu-Silicium / UniXNU 也搜不到
+2. 四张实拍里绿条高度与字号**比例恒定**，只是拍摄距离不同
+3. A/B 探针实验证实：绿条**下方**画的红块/绿块都能正常显示
+
+⇒ 绿条只是 UEFI 侧的固定横幅，**不能**当内核进度用。判读只看方块。
+
+#### A/B 探针实验（决定性）
+在 DarwinBoot 里同一次启动画两块（都在绿条下方 y=800）：
+| 探针 | 时机 | 结果 |
+|---|---|---|
+| 绿块 (700,800) | `ExitBootServices` **之前** | ✅ 出现 |
+| 红块 (32,800) | `ExitBootServices` **之后** | ✅ 出现 |
+
+⇒ 交棒后 fb 可写可见，**排除**"帧缓冲失效"这条路线。
+
 ### 坑 10：`nabu_mark_init(args->Video)` 编译不过（已修）
 ```
 error: passing 'Boot_Video' (aka 'struct Boot_Video') to parameter of
@@ -415,21 +447,19 @@ fastboot boot C:\Users\Administrator\Desktop\unixnu-nabu-kernel-ufs\nabu-xnu64-U
 **判读新增的"红块"信号**：若右上角（第 8 槽）出现红块，说明内核侧认为
 `Video` 布局仍然对不上 —— 那意味着固件没重编成功，而不是帧缓冲问题。
 
-方块语义（v2：MARK1 已下沉到 `arm_init` 入口，共 5 级；从 `(32,32)` 起、间隔 64px）：
+方块语义（v3：早期只记 RAM，`PE_create_console` 之后一次性回放；从 `(32,32)` 起、间隔 64px）：
 
-> ⚠️ 还有一个**独立**信号：屏幕顶部**绿色横条**由 BootShim 画，表示
-> "kernel entry code ran"（内核入口汇编跑过了）。它与方块是两件事：
-> **有绿条 + 无方块 ⇒ 死在入口之后、`arm_init` 之前，或帧缓冲不可写。**
+> ⚠️ **绿条不是进度信号**（见坑 12）。只数方块。
+> 因为 `PE_create_console` 之前无法写屏，**"0 块"只能说明"死在 console 之前"，
+> 无法再细分**——这是当前观测手段的硬限制。
 
-| 方块数 | 颜色 | 含义 | 下一步 |
-|---|---|---|---|
-| **0**（有绿条）| — | 死在 `arm_init` 之前（start.s / MMU / 栈），或 fb 写不进去 | 走第 6 步 |
-| 1 | 白 | 进了 `arm_init` 入口（`arm_setup_pre_sign` 之前）| 死于 JOP rebase+sign / `cpu_data_init` |
-| 2 | 黄 | 过了 JOP 签名与 `cpu_data_init`，到 `PE_init_platform` 前 | `PE_init_platform` 内部炸 |
-| 3 | 青 | 到 `PE_create_console` 前 | `PE_create_console` 内部炸 |
-| 4 | 绿 | 过了 `PE_create_console` ← **console 通了** | 看方块 5 |
-| 5 | 品红 | 过了第二次 `PE_init_platform` | 已过 console+printf，去查 `machine_startup` |
-| 附加红块 | 红 | **右上角独立红块** = 内核认为 Video 布局/深度不对 | 固件没重编成功 |
+| 方块数 | 颜色 | 含义 |
+|---|---|---|
+| **0** | — | 死在 `PE_create_console()` 之前（`arm_init` 早期 / JOP 签名 / `arm_vm_init`）|
+| 4 | 白黄青绿 | 到了 `PE_create_console()`，且 1/2/3 全部经过（正常情况）|
+| 5 | +品红 | 全过，包括第二次 `PE_init_platform` |
+| 附加红块 | 红 | 右上角独立红块 = Video 布局/深度可疑（固件没生效，或 fallback 生效）|
+| 只有 1~3 块 | — | 不会出现：回放一定会把已命中的全部画出，缺号说明位图/几何有问题 |
 
 ### 第 6 步（仅方块 0 时）
 `Video` 基址在内核早期页表里没有映射（内核 start.s 沿用 UEFI 页表，但只保证 RAM 区域），
