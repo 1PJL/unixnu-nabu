@@ -32,7 +32,6 @@ archives = [
   "build-arm-driver.py ArmDTPlatform",
   "build-arm-driver.py ArmCpu",
   "build-arm-driver.py NativeAES",
-  "build-arm-driver.py NativeUfs",
 ]
 
 [payload.adt]
