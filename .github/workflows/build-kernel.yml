@@ -113,14 +113,16 @@ jobs:
           git -C refer/IOStorageFamily checkout -q e45fbe30a7879e0b16e26dddb78538f1b00e0bff
           echo "IOStorageFamily HEAD: $(git -C refer/IOStorageFamily rev-parse HEAD)"
 
-      - name: Inject early checkpoint marks (diagnostic)
-        run: |
-          bash "$GITHUB_WORKSPACE/scripts/inject-early-marks.sh" "$GITHUB_WORKSPACE/UniXNU/out/nabu/tree/refer/xnu"
 
       - name: Build kernel
 
         run: |
           cd UniXNU
+          # refer sources are fetched lazily by the build, so make them appear first
+          ./unixnu fetch xnu || true
+          ./unixnu tree || true
+          ls -la out/nabu/tree/refer/ || true
+          bash "$GITHUB_WORKSPACE/scripts/inject-early-marks.sh" "$GITHUB_WORKSPACE/UniXNU/out/nabu/tree/refer/xnu" || true
           ./unixnu build kernel
           ls -lh out/nabu/kernel/ || true
         timeout-minutes: 180
@@ -140,4 +142,6 @@ jobs:
             UniXNU/out/nabu/kernel/
             UniXNU/out/nabu/logs/
           if-no-files-found: warn
+
+
 
