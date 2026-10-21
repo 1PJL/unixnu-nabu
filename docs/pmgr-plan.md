@@ -19,6 +19,9 @@ XNU 在 `bsd_init` 之前就会通过 `ApplePMGR` 家族访问 AON / PMGR 寄存
 
 ## 1. SM8150 侧的真实形态（和苹果完全不同）
 
+> 详见 `docs/nabu-dts-extract.md`：该表来自公共 nabu DTS，地址已核对。
+
+
 | 层 | 苹果 | SM8150 |
 |---|---|---|
 | 寄存器访问 | MMIO + AON mailbox | **IPC(CmdDb) 消息**、RPMh 命令 TCS、SPMI |
@@ -28,7 +31,8 @@ XNU 在 `bsd_init` 之前就会通过 `ApplePMGR` 家族访问 AON / PMGR 寄存
 已确认基址：
 
 ```
-IPCC      0x17c00000  (0x1000)
+RPMh RSC  0x18200000  (0x10000) ×3 banks   <-- 真正的 RPMh 入口
+IPCC/apss_shared 0x17c00000  (0x1000)  <-- 只是 mailbox，不是 RPMh
 cmd-db    0x85f20000  (0x20000)
 SPMI      0x0c440000
 watchdog  0x17c10000
