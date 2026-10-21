@@ -1,5 +1,5 @@
 # nabu_defconfig
-# build-arm-driver.py 已从 UniXNU-sheng 移植，可编 ArmDTPlatform/ArmCpu
+# build-arm-driver.py 宸蹭粠 UniXNU-sheng 绉绘锛屽彲缂?ArmDTPlatform/ArmCpu
 
 CONFIG_XNU_ARM_DT_PLATFORM=y
 CONFIG_XNU_ARMCPU=y
@@ -9,3 +9,4 @@ CONFIG_XNU_DT_PANIC_REGION=y
 CONFIG_XNU_SOURCE_CORECRYPTO14=y
 CONFIG_XNU_CRYPTO_BOOTSTRAP="prelinked"
 CONFIG_XNU_OWNER_DATA_VOLUME_UUID="BEC2158A-350E-4F2E-B87E-A0E69FB0BDEA"
+CONFIG_XNU_NATIVE_UFS=y
