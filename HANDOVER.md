@@ -1,7 +1,8 @@
 # UniXNU on Xiaomi Pad 5 (nabu / SM8150) — 完整交接文档
 
 > 状态：**XNU 内核已在真机上进入执行**（DarwinBoot `exiting boot services` → `hand-off to the kernel`）
-> 当前工作：给内核装"可见性探针"（把黑箱变白箱），**尚未完成**。
+> 当前工作：给内核装"可见性探针"（把黑箱变白箱）。
+> 注入链路已修好并推送（UniXNU `18ca785`），**下一步是跑 CI 验证 + 刷机数方块**（见第 7 节第 4–5 步）。
 
 ---
 
@@ -125,8 +126,13 @@ else if (RamdiskOffset != MAX_UINTN) { Status = EFI_UNSUPPORTED; goto Fail; }
 
 ### 已实现
 - `kits/nabu/nabu_early_mark.{c,h}`（纯 C，`gcc -fsyntax-only` 通过）
-- `scripts/inject-early-marks.sh`（幂等，锚点 assert）
-- **已内联进** `UniXNU/scripts/build-xnu-4k-baseline.sh`
+- `scripts/inject-early-marks.sh`（**参考用**：注入任意给定 xnu 源树；CI 不再调用它）
+- ✅ **权威实现在** `UniXNU/scripts/build-xnu-4k-baseline.sh`（commit `18ca785`）：
+  补丁循环之后注入 `.cache/xnu-work`，带 pre-clean 可重入，锚点缩进无关，MARK1–MARK4 齐全
+
+> `.github/workflows/build-kernel.yml` 里原来那步「注入 `refer/xnu`」已删除——那棵树不参与编译，
+> 留着只会误导；改为构建后新增 `Verify early checkpoint marks` 步骤，自动打印
+> `marks inserted` / `WARN: mark? anchor` / `llvm-nm` 符号检查三份证据。
 
 ### 注入踩坑史（重要！）
 1. CI 独立步骤 → `refer/xnu` 不存在（**refer 源延迟拉取**，`tree.py` 注释 `fetched when a step needs it`）
@@ -135,7 +141,13 @@ else if (RamdiskOffset != MAX_UINTN) { Status = EFI_UNSUPPORTED; goto Fail; }
 4. 移出 if 块 → PowerShell `Set-Content -Encoding UTF8` 写入 **BOM+CRLF** → bash 解析失败（已用 Python 归一成 LF）
 5. 注入到 `refer/xnu` → 不生效，**真正构建目录是 `.cache/xnu-work`** ✅ 已改
 6. 改到 `.cache/xnu-work` → CI **failure**：注入改了 `arm_init.c`，与后续 `git apply` 官方补丁**冲突**
-   → 修法（未做完）：注入块移到**补丁循环 `done`（第113行）之后**，并把 `assert a in s` 改容错
+   → ✅ **已修**：注入块移到补丁循环 `done`（第113行）**之后**，并加了 pre-clean 反向清理
+   （`native-4k-user-abi.patch`、`zzz-boot-progress.patch` 改 `osfmk/arm/arm_init.c`；
+   `source-machine-layer.patch` 改 `osfmk/conf/files.arm64`）
+7. 锚点原来是 `assert`，实测发现**缩进敏感**（`\t` vs 空格）会误判
+   → ✅ 改为**缩进无关正则** + 无匹配只 `print WARN` 不中断；`#include` 锚点缺失时回落到最后一个 `#include` 行
+8. 内核构建会跑**两遍**脚本（bootstrap pass 出编译记录 → 真正的 pass），同一 `.cache/xnu-work`
+   → ✅ pre-clean 让注入可重入（`MKU` 先撤、`MKP` 再注），CI 复用工作树也不会污染补丁上下文
 
 ### 验证注入是否生效
 - ❌ 别只看 CI 控制台（脚本 stdout 被重定向进产物）
@@ -156,11 +168,20 @@ else if (RamdiskOffset != MAX_UINTN) { Status = EFI_UNSUPPORTED; goto Fail; }
 | `pexpert/gen/pe_gen.c` | 135 | `PE_init_printf(boolean)`（`TRUE`→vcattach）|
 | `osfmk/conf/files.arm64` | 51 | `osfmk/arm/arm_init.c	optional config_pmap_ppl`（新文件照此格式追加）|
 
-构建脚本 `UniXNU/scripts/build-xnu-4k-baseline.sh`：
-- 13-16：`if [ ! -d refer/xnu/.git ]; then git clone ...; fi`
-- 80-82：`if [ ! -d .cache/xnu-work/.git ]; then git clone --shared refer/xnu .cache/xnu-work; fi`
-- 103-113：**补丁应用循环（注入必须在这之后）**
-- 935：`make -C .cache/xnu-work ...`（真正编译）
+构建脚本 `UniXNU/scripts/build-xnu-4k-baseline.sh`（行号按 commit `18ca785`）：
+
+| 行 | 内容 |
+|---|---|
+| 13 | `if [ ! -d refer/xnu/.git ]; then git clone ...; fi`（refer 源，**不参与编译**）|
+| 21 | `if [ ! -d .cache/xnu-work/.git ]; then git clone --shared refer/xnu .cache/xnu-work; fi` |
+| 40-66 | **nabu pre-clean（MKU）**：撤掉上一次注入，保证补丁 `apply --check` 上下文干净 |
+| 76-81 | **补丁应用循环**（`done` 在第 81 行）|
+| 82-169 | **nabu 注入块（MKP）**：写 `nabu_early_mark.{c,h}` + `files.arm64` + `arm_init.c` 四个 MARK |
+| 992 | `make -C .cache/xnu-work "${XNU_BUILD_TARGET:-build}" ...`（真正编译）|
+
+> ⚠️ 注入**必须**在补丁循环之后：`native-4k-user-abi.patch` 与 `zzz-boot-progress.patch` 都改
+> `osfmk/arm/arm_init.c`，`source-machine-layer.patch` 改 `osfmk/conf/files.arm64`。
+> 另外内核构建会跑**两遍**脚本（bootstrap pass + 正式 pass），所以 pre-clean 是必需的，不是可选。
 
 ---
 
@@ -208,12 +229,68 @@ cd /root/Mu-Silicium && python3 build_uefi.py -d nabu -r DEBUG
 
 ## 7. 下个会话第一件事（按顺序）
 
-1. 把 `build-xnu-4k-baseline.sh` 的注入块**移到补丁循环 `done`（第113行）之后**
-2. 块内 python 的 `assert a in s, 'markN anchor'` 改为容错打印（不抛异常；`str.replace` 无匹配是 no-op，天然安全）
-3. `bash -n` 校验 → commit/push UniXNU → 触发 CI
-4. 下载产物 → 查 `kernel.log` 有 `nabu_early_mark` 编译记录 + `kernel.macho` 有 `nabu_mark`
-5. 重打 cust payload → 进 fastboot → 刷 + 启 → **数方块**
-6. 若方块 0：帧缓冲在 arm_init 未映射 → 改"写可写 RAM + DarwinBoot 回读"
+> ✅ 1–3 已完成（commit `18ca785` @ UniXNU main）。**从第 4 步接着做。**
+
+| # | 事项 | 状态 |
+|---|---|---|
+| 1 | 注入块移到补丁循环 `done` 之后 | ✅ 完成 |
+| 2 | `assert` 改容错（并升级为缩进无关正则） | ✅ 完成 |
+| 3 | `bash -n` 校验 → commit/push UniXNU → 触发 CI | ✅ 完成（`18ca785`）|
+| 4 | 下载产物 → 查日志/符号 | ⬜ **从这里开始** |
+| 5 | 重打 cust payload → 刷 + 启 → 数方块 | ⬜ |
+| 6 | 若方块 0：改"写可写 RAM + DarwinBoot 回读" | ⬜ 条件触发 |
+
+### 第 4 步：确认注入真的进了二进制
+
+触发方式（workflow_dispatch，`build-kernel.yml`）：
+```bash
+gh workflow run build-kernel.yml --repo Lux12138/unixnu-nabu
+gh run watch --repo Lux12138/unixnu-nabu
+gh run download --repo Lux12138/unixnu-nabu -n kernel-nabu -D /tmp/nabu-kernel
+```
+
+三处证据（**新增的 `Verify early checkpoint marks` 步骤已经把这三条打好了**）：
+
+```bash
+# ① 增量补丁干净应用（没有 apply 失败 = 注入没和补丁打架）
+grep -a 'error: patch failed' /tmp/nabu-kernel/logs/kernel.log || echo clean
+# ② 注入记录：必须看到 MARK1..MARK4 全 True
+grep -a 'marks inserted' /tmp/nabu-kernel/logs/kernel.log
+# 期望: marks inserted: MARK1=True MARK2=True MARK3=True MARK4=True
+# 若出现 WARN: mark? anchor missing → 上游源码锚点漂移，按第 4 节行号重新核对
+# ③ 符号真的链进内核
+xcrun llvm-nm --defined-only /tmp/nabu-kernel/kernel/kernel.macho | grep nabu_mark
+# 期望: 两行 _nabu_mark / _nabu_mark_init（T）
+```
+⚠️ **别只看 CI 控制台**（脚本 stdout 被重定向进 `out/nabu/logs/kernel.log`）；
+`kernel-bootstrap.log` 是 bootstrap pass 的日志，两遍都会跑注入，两遍都该出现 `marks inserted`。
+
+### 第 5 步：刷机 + 数方块
+```bash
+# ADT（务必不带 RAMDisk 占位符）
+python3 UniXNU/scripts/make-nabu-adt.py --dram-size 0x300000000 \
+  --owned-memory-size 0x130000000 --cpu-regs "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700" \
+  --ipad-identity --chip-id 0x207 --unique-chip-id 0x0000000000000001 --output kernel.macho.adt
+bash unixnu-nabu-gh/scripts/make-cust-payload.sh kernel.macho kernel.macho.adt cust-payload.img
+# 刷前确认 Sending 'cust' (65536 KB)，别被截断
+fastboot flash cust cust-payload.img
+fastboot boot C:\Users\Administrator\Desktop\unixnu-nabu-kernel-ufs\nabu-xnu64-T.img
+```
+**每次 boot 前先长按电源 10 秒重启**（坑 3）。
+
+方块语义（臂左上横条，从 `(32,32)` 起、间隔 64px）：
+
+| 方块数 | 颜色 | 含义 | 下一步 |
+|---|---|---|---|
+| 0 | — | 死在汇编入口/MMU，或帧缓冲未映射 | 走第 6 步 |
+| 1 | 白 | 进了 `arm_init`（MARK1）| 死亡点在 `PE_init_platform`~`PE_create_console` 之间 |
+| 2 | 黄 | 过了 `PE_init_platform`（MARK2）| `PE_create_console()` 内部炸 |
+| 3 | 青 | 过了 `PE_create_console` ← **console 通了** | 看方块 4 |
+| 4 | 绿 | 过了第二次 `PE_init_platform`（MARK4）| 已过 console + printf，去查 `machine_startup` |
+
+### 第 6 步（仅方块 0 时）
+`args->Video` 的物理基址在 `arm_init` 阶段没被 bootstrap 页表映射 →
+改用 **写入一块已知可写 RAM + DarwinBoot 回读打印**的通道。
 
 ### 备选（若标记路线受阻）
 - B：DarwinBoot 在 EL2 交付（需 EL 切换，改动大）

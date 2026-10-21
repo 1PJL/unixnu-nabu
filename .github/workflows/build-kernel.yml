@@ -1,4 +1,4 @@
-﻿name: build-xnu-kernel
+name: build-xnu-kernel
 
 on:
   workflow_dispatch:
@@ -122,10 +122,33 @@ jobs:
           ./unixnu fetch xnu || true
           ./unixnu tree || true
           ls -la out/nabu/tree/refer/ || true
-          bash "$GITHUB_WORKSPACE/scripts/inject-early-marks.sh" "$GITHUB_WORKSPACE/UniXNU/out/nabu/tree/refer/xnu" || true
+          # The nabu early-checkpoint marks are injected by
+          # UniXNU/scripts/build-xnu-4k-baseline.sh itself, into .cache/xnu-work
+          # (the tree that is actually compiled) and only after patches/xnu/*.patch
+          # are applied. Injecting refer/xnu from here has no effect on the build.
           ./unixnu build kernel
           ls -lh out/nabu/kernel/ || true
         timeout-minutes: 180
+
+      - name: Verify early checkpoint marks
+        if: always()
+        run: |
+          echo "=== injection records in build logs ==="
+          for f in UniXNU/out/nabu/logs/kernel.log UniXNU/out/nabu/logs/kernel-bootstrap.log; do
+            if [ -f "$f" ]; then
+              echo "--- $f"
+              grep -a -E 'nabu pre-clean|marks inserted|WARN: mark' "$f" || echo "    (no mark record)"
+            fi
+          done
+          echo "=== nabu symbols in the built mach-o ==="
+          found=0
+          while IFS= read -r k; do
+            found=1
+            echo "--- $k"
+            ls -lh "$k"
+            xcrun llvm-nm --defined-only "$k" 2>/dev/null | grep -i nabu_mark || echo "    (no nabu_mark symbol)"
+          done < <(find UniXNU/out/nabu/kernel -name '*.macho' 2>/dev/null | head -5)
+          [ "$found" = 1 ] || echo "(no mach-o in UniXNU/out/nabu/kernel)"
 
       - name: Dump build log on failure
         if: failure()
