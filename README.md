@@ -188,7 +188,11 @@ fastboot boot nabu-xnu.img     # boot.img = BootShim + FD(3MB) + 64MB ramdisk
 
 ---
 
-## 五、下一步（PMGR）
+## 五、下一步
+
+> 顺序：先做**早期 console 走帧缓冲**（`docs/early-console-plan.md`），
+> 拿到屏幕上的 panic 输出；再做 PMGR（`docs/pmgr-plan.md`）。
+
 
 > 参见 `docs/prior-art-0xDive-ios-nabu.md`：同类项目的路线对比，
 > 以及可借鉴的 nabu 公共 DTS / USB-PHY 参数。
