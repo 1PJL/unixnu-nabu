@@ -530,3 +530,61 @@ fastboot boot C:\Users\Administrator\Desktop\unixnu-nabu-kernel-ufs\nabu-xnu64-U
 | `kits/nabu/nabu_early_mark.{c,h}` | 方块检查点（纯 C）|
 | `scripts/make-cust-payload.sh` | cust payload 生成 |
 | `scripts/inject-early-marks.sh` | 标记注入器 |
+
+---
+
+## 13. xnu-10063 启动停在 mig_init（本轮定位结论）
+
+### 事实链（全部有硬件证据）
+
+| 检查点 | 读数 | 含义 |
+|---|---|---|
+| `NABU_MARK(8)` | 8 | 进入 `kernel_bootstrap` |
+| 自动编号 18..44 | 26 | 走到 `mac_policy_init` |
+| 45 / 46 | **45** | `mac_policy_init()` 返回；`kernel_startup_initialize_upto(STARTUP_SUB_MACH_IPC)` 内崩 |
+| 子系统 + 条目 | 13 / 27 | MACH_IPC 轮第 28 个条目 |
+| `cur->func` 散列 | 56 → 50 | 两版工具链下都唯一映射到 **`_mig_init`** |
+| `mig_e[i]` 索引 | **0** | `_mach_vm_subsystem` |
+| 例程索引 j | **0** | `mach_vm_allocate`（msgid 4800） |
+| stub 指针散列 | 19 | `0x...153c >> 4 & 0x3F`，与静态 dump 一致 → kstub **非零** |
+
+`mig_init()` 的五个 panic 分支中，触发的是：
+
+```c
+panic("kroutine must have precise size %d %d", mig_e[i]->start, j);
+```
+
+即 `mach_vm_allocate` 的 `max_reply_msg == 0`。但 `mach_vm.defs` 里它有 `out` 参数，
+描述符**理应**带回复尺寸 —— 所以是**构建期 mig 生成环节丢了该字段**，不是定义问题。
+
+### 已排除
+
+- 重复注册：31 个 ops、31 个唯一 `iko_op_type`
+- 数组越界：`__init_entry_set` 95856 B = 3994×24；`ipc_kobject_ops_array` 1728 B = 54×32
+- 工具链版本：`picked: /Applications/Xcode_15.0.app` 后仍停在同一个 panic
+- 我们的补丁：patch 集里没有任何 `IKOT` / `mig` 改动
+- 跨 boot RAM 传递：`keep probe` 第二次启动仍是 `fresh RAM`，DRAM 不保留
+
+### 采用的处置
+
+把 panic 改为回退：
+
+```c
+} else {
+    mig_buckets[pos].kreply_size = mig_e[i]->maxsize;   /* 保守值 */
+    mig_buckets[pos].kreply_desc_cnt =
+        mig_e[i]->kroutine[j].reply_descr_count;
+}
+```
+
+属于**务实绕过**（尺寸偏大只浪费内存，panic 则丢整个启动）。副作用与隐患：
+回复缓冲区按子系统最大值（mach_vm 为 4140 B）分配，若后续出现 kalloc 压力或
+reply 解析异常，应优先怀疑此处。
+
+### 探针经验（避免再踩）
+
+- framebuffer 在 `arm_init` 全程**未映射**；`ml_io_map_unmappable` 自建映射后才可写
+- 方块条最多 24 格且按编号**从小到大**画，晚期的 45/46/50/60 会被挤掉（已改为画最新 24 个）
+- `draw_number` 必须画前擦格，否则十位残留（50 会被读成 54/58）
+- 单一数字放不下信息：mach 启动表有 1736 条（`subsystem <= 14`），ZALLOC 独占 767 条，
+  已改为「子系统 + 条目序号」双格，再升级为 `nabu_mark_quad` 四格
