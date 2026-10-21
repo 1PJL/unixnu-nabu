@@ -1,4 +1,4 @@
-name: build-xnu-kernel
+﻿name: build-xnu-kernel
 
 on:
   workflow_dispatch:
@@ -112,6 +112,10 @@ jobs:
           fi
           git -C refer/IOStorageFamily checkout -q e45fbe30a7879e0b16e26dddb78538f1b00e0bff
           echo "IOStorageFamily HEAD: $(git -C refer/IOStorageFamily rev-parse HEAD)"
+
+      - name: Inject early checkpoint marks (diagnostic)
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/inject-early-marks.sh" "$GITHUB_WORKSPACE/UniXNU/out/nabu/tree/xnu"
 
       - name: Build kernel
 
