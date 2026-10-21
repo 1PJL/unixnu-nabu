@@ -309,8 +309,32 @@ cd /root/Mu-Silicium && python3 build_uefi.py -d nabu -r DEBUG
 | 3.5 | 首轮 CI 修注入冲突 → 暴露编译错误 → 再修 | ✅ 完成（见下）|
 | 4 | 下载产物 → 查日志/符号 | ✅ 完成（run `39612555624` success）|
 | 4.5 | 查真因：`boot_args.Video` 布局错位 | ✅ 确认（见坑 8 更正）|
-| 5 | 重编固件（修 Video）→ 重打 cust payload → 刷 + 启 → 数方块 | ⬜ **下一步，需接设备** |
+| 5 | 重编固件（修 Video）→ 重打 cust payload → 刷 + 启 → 数方块 | 🔄 第 1 轮已刷：方块 **0**（见下），已下沉 MARK1 等第 3 轮内核 |
 | 6 | 若方块 0：改"写可写 RAM + DarwinBoot 回读" | ⬜ 条件触发 |
+
+### 第 5 步实测（第 1 轮刷机，固件已修 + 内核含 MARK1–4）
+真机屏幕实拍读出的关键行：
+```
+DB1 kernel read  Success size=0x3345000
+DB2 kernel parse Success
+DB3 adt read     Success size=0x330C
+DB4 adt ok win=0x130000000 keep=0 rd=ffffffffffffffff
+DARWINBOOT: video base=0x50000000 display=1 row=6400 width=1600 height=2560 depth=32
+DARWINBOOT: inputs validated; exiting boot services
+```
+**结论（三条）**：
+1. ✅ **Video 布局修复在硬件上生效**：`display=1 row=6400 width=1600 height=2560 depth=32`
+   —— 正是 `struct Boot_Video` 的正确顺序（旧固件这里会打印 `display=6400`）。
+2. ✅ **内核入口汇编跑过了**：屏幕顶部有 BootShim 的**绿色横条**
+   （BootShim 提示语：`A green bar across the top means the kernel entry code ran`）。
+3. ❌ **方块数 = 0**：UEFI 菜单与日志文字**完好无损**，说明内核一次都没写过帧缓冲。
+
+⇒ 死亡点比原 MARK1 更早。`arm_init` 在 `PE_init_platform` 之前还有
+`arm_setup_pre_sign()` → `arm_slide_rebase_and_sign_image()`（JOP rebase+sign）
+→ `cpu_data_init()`，原 MARK1 插在这些之后，**盲区就在这段**。
+
+**已采取**：MARK1 下沉到 `arm_init` 的**第一条语句之前**，并把标记扩成 5 级
+（见上面 v2 方块表）。第二轮只需再刷一次内核（固件不用动）。
 
 ### 第 4 步验证结果（run `39612555624`，success）
 ```
@@ -391,19 +415,29 @@ fastboot boot C:\Users\Administrator\Desktop\unixnu-nabu-kernel-ufs\nabu-xnu64-U
 **判读新增的"红块"信号**：若右上角（第 8 槽）出现红块，说明内核侧认为
 `Video` 布局仍然对不上 —— 那意味着固件没重编成功，而不是帧缓冲问题。
 
-方块语义（臂左上横条，从 `(32,32)` 起、间隔 64px）：
+方块语义（v2：MARK1 已下沉到 `arm_init` 入口，共 5 级；从 `(32,32)` 起、间隔 64px）：
+
+> ⚠️ 还有一个**独立**信号：屏幕顶部**绿色横条**由 BootShim 画，表示
+> "kernel entry code ran"（内核入口汇编跑过了）。它与方块是两件事：
+> **有绿条 + 无方块 ⇒ 死在入口之后、`arm_init` 之前，或帧缓冲不可写。**
 
 | 方块数 | 颜色 | 含义 | 下一步 |
 |---|---|---|---|
-| 0 | — | 死在汇编入口/MMU，或帧缓冲未映射 | 走第 6 步 |
-| 1 | 白 | 进了 `arm_init`（MARK1）| 死亡点在 `PE_init_platform`~`PE_create_console` 之间 |
-| 2 | 黄 | 过了 `PE_init_platform`（MARK2）| `PE_create_console()` 内部炸 |
-| 3 | 青 | 过了 `PE_create_console` ← **console 通了** | 看方块 4 |
-| 4 | 绿 | 过了第二次 `PE_init_platform`（MARK4）| 已过 console + printf，去查 `machine_startup` |
+| **0**（有绿条）| — | 死在 `arm_init` 之前（start.s / MMU / 栈），或 fb 写不进去 | 走第 6 步 |
+| 1 | 白 | 进了 `arm_init` 入口（`arm_setup_pre_sign` 之前）| 死于 JOP rebase+sign / `cpu_data_init` |
+| 2 | 黄 | 过了 JOP 签名与 `cpu_data_init`，到 `PE_init_platform` 前 | `PE_init_platform` 内部炸 |
+| 3 | 青 | 到 `PE_create_console` 前 | `PE_create_console` 内部炸 |
+| 4 | 绿 | 过了 `PE_create_console` ← **console 通了** | 看方块 5 |
+| 5 | 品红 | 过了第二次 `PE_init_platform` | 已过 console+printf，去查 `machine_startup` |
+| 附加红块 | 红 | **右上角独立红块** = 内核认为 Video 布局/深度不对 | 固件没重编成功 |
 
 ### 第 6 步（仅方块 0 时）
-`args->Video` 的物理基址在 `arm_init` 阶段没被 bootstrap 页表映射 →
-改用 **写入一块已知可写 RAM + DarwinBoot 回读打印**的通道。
+`Video` 基址在内核早期页表里没有映射（内核 start.s 沿用 UEFI 页表，但只保证 RAM 区域），
+所以 `nabu_mark_init` 的写会 fault。两个方向：
+1. **先确认 fb 是否真的不可写**：让 DarwinBoot 在 `ExitBootServices` 之后、`DarwinEnter` 之前
+   用自己已验证过的 fb 画一个"交棒块"。屏幕上出现交棒块但**没有** MARK1 ⇒ 内核侧 fb 不可写（确诊）。
+2. **改用 RAM 传递**：`arm_init` 早期只写静态变量（bss 必然可写），
+   在 `arm_vm_init` 之后用 pmap 映射 fb，再一次性 flush 全部检查点到屏幕。
 
 ### 备选（若标记路线受阻）
 - B：DarwinBoot 在 EL2 交付（需 EL 切换，改动大）
