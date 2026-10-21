@@ -2,7 +2,11 @@
 
 > 状态：**XNU 内核已在真机上进入执行**（DarwinBoot `exiting boot services` → `hand-off to the kernel`）
 > 当前工作：给内核装"可见性探针"（把黑箱变白箱）。
-> 注入链路已修好并推送（UniXNU `18ca785`），**下一步是跑 CI 验证 + 刷机数方块**（见第 7 节第 4–5 步）。
+> ✅ 注入链路已修好并 **CI 跑通**（UniXNU `0c4e9a1` / unixnu-nabu `b7642cf`，run `39612555624` success，
+> 方块标记 MARK1–4 已链进 `kernel.macho`）。
+> ✅ 同时查实"内核无输出"的**真因**：DarwinBoot 的 `boot_args.Video` 被改成了旧数组顺序，
+> 与内核 `struct Boot_Video` 字段错位（详见 **坑 8 更正**）。
+> ⬜ 下一步：**重编固件 + 刷机数方块**（第 7 节第 5 步，需要接设备）。
 
 ---
 
@@ -129,9 +133,33 @@ else if (RamdiskOffset != MAX_UINTN) { Status = EFI_UNSUPPORTED; goto Fail; }
 > v_width=height、v_height=depth、v_depth=display位段全 0` ——
 > **整条 video 参数全错位**，`vcattach` 拿到的行宽/宽高都是错的，表现就是"没有输出"。
 >
-> ⇒ 这**很可能**才是"内核在 `PE_create_console` 之前静默死亡"的真因，而不是早期就挂了。
-> 待核实项：DarwinBoot 侧 `BootVideo.h` 当前实际写入顺序（下一步要么查源码、要么看红块探针）。
-> 方块标记已内置自动判据：**Video 布局对不上时右上角会出现红块**（见坑 10）。
+> ⇒ 这**就是**"内核在 `PE_create_console` 之前静默死亡"的真因（已核实，非推测）：
+> `vcattach` 拿到的 `v_rowBytes=1600`（真实 6400）、`v_width=2560`（真实 1600）、
+> `v_height=32`（真实 2560）、`v_depth=0` —— 屏幕参数全错，图形 console 起不来。
+>
+> **核实证据链**：
+> 1. `pexpert/arm/pe_init.c:419-429` 按**字段名**读（不是按下标数组读）
+> 2. `pexpert/pexpert/arm64/boot.h:31-38` 结构体顺序 = base, display, rowBytes, width, height, depth
+> 3. `drivers/DarwinBoot/DarwinBootPkg/Driver/BootVideo.h` 的 `git diff` 显示：
+>    **上游原版本来就是正确的结构体顺序**
+>    ```c
+>    Video[0] = FrameBufferBase;              Video[1] = 1;      // v_display
+>    Video[2] = RowBytes;                     Video[3] = HorizontalResolution;
+>    Video[4] = VerticalResolution;           Video[5] = 32;
+>    ```
+>    而"坑 8 修复"把它改成了 `Video[1]=RowBytes … Video[5]=0` —— **方向改反了**。
+> 4. `DarwinBoot.c` 的 `DiagDraw` 被同步改成用 `Video[1]` 当 rowBytes（也是反的），
+>    而 `Video[2]*Video[4]`（FB size）、`Video[3]/Video[4]`（宽高）等其它调用点
+>    **一直是结构体语义、没被改** —— 自证原始代码是对的。
+>
+> ✅ **已回滚（WSL `/root/UniXNU/drivers/DarwinBoot`）**：
+> - `git checkout -- DarwinBootPkg/Driver/BootVideo.h` → 恢复上游结构体顺序
+> - `DiagDraw` 的 5 处下标改回 `Video[2]`=rowBytes / `Video[3]`=width / `Video[4]`=height
+> - 其它调用点（`Video[2]*Video[4]`=FB size、`Video[3]`/`Video[4]`=宽高、
+>   日志里的 base/width/height/row/depth）**本来就是结构体语义，无需改**
+>
+> ⇒ **结论：上游 HEAD 的 DarwinBoot 就是对的。不需要 patch、不需要 fork。**
+> 要做的只是"别再按数组顺序改它"。重编固件后 `Video` 布局即与内核一致。
 
 ### 坑 10：`nabu_mark_init(args->Video)` 编译不过（已修）
 ```
@@ -279,9 +307,22 @@ cd /root/Mu-Silicium && python3 build_uefi.py -d nabu -r DEBUG
 | 2 | `assert` 改容错（并升级为缩进无关正则） | ✅ 完成 |
 | 3 | `bash -n` 校验 → commit/push UniXNU → 触发 CI | ✅ 完成（`18ca785`）|
 | 3.5 | 首轮 CI 修注入冲突 → 暴露编译错误 → 再修 | ✅ 完成（见下）|
-| 4 | 下载产物 → 查日志/符号 | ⬜ **从这里开始** |
-| 5 | 重打 cust payload → 刷 + 启 → 数方块 | ⬜ |
+| 4 | 下载产物 → 查日志/符号 | ✅ 完成（run `39612555624` success）|
+| 4.5 | 查真因：`boot_args.Video` 布局错位 | ✅ 确认（见坑 8 更正）|
+| 5 | 重编固件（修 Video）→ 重打 cust payload → 刷 + 启 → 数方块 | ⬜ **下一步，需接设备** |
 | 6 | 若方块 0：改"写可写 RAM + DarwinBoot 回读" | ⬜ 条件触发 |
+
+### 第 4 步验证结果（run `39612555624`，success）
+```
+① 补丁冲突：无 patch failed / does not apply
+② 注入记录：
+   kernel-bootstrap.log : marks inserted: MARK1=True MARK2=True MARK3=True MARK4=True
+   kernel.log           : nabu pre-clean: reverted .cache/xnu-work/osfmk/arm/arm_init.c
+                          nabu pre-clean: reverted .cache/xnu-work/osfmk/conf/files.arm64
+                          marks inserted: MARK1=True MARK2=True MARK3=True MARK4=True
+   ← 两遍脚本、pre-clean 生效、第二遍重新注入正确：设计验证通过
+③ 符号（kernel.macho 53,760,000 B）：_nabu_mark ×6、_nabu_mark_init ×2
+```
 
 ### 第 3.5 步：首轮 CI 结果（记录在案）
 - run `39611266428` **failure**，但**不再是补丁冲突**——冲突已修好。
@@ -319,17 +360,36 @@ xcrun llvm-nm --defined-only /tmp/nabu-kernel/kernel/kernel.macho | grep nabu_ma
 `kernel-bootstrap.log` 是 bootstrap pass 的日志，两遍都会跑注入，两遍都该出现 `marks inserted`。
 
 ### 第 5 步：刷机 + 数方块
+
+**5a. 重编固件（必须先做！否则 Video 仍是错的）**
+DarwinBoot 已回滚到上游正确版本，重编即生效：
+```bash
+wsl -e bash
+cd /root/Mu-Silicium && python3 build_uefi.py -d nabu -r DEBUG
+cd /root/UniXNU && ./unixnu bootimg        # 打包成 Android boot 镜像（UEFI FD + dtb + ramdisk）
+```
+产物按既有命名递增（当前最新 `nabu-xnu64-T.img`，下一个建议 `-U`），放到
+`C:\Users\Administrator\Desktop\unixnu-nabu-kernel-ufs\`。
+
+**5b. 重打 cust payload（内核侧）**
 ```bash
 # ADT（务必不带 RAMDisk 占位符）
 python3 UniXNU/scripts/make-nabu-adt.py --dram-size 0x300000000 \
   --owned-memory-size 0x130000000 --cpu-regs "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700" \
   --ipad-identity --chip-id 0x207 --unique-chip-id 0x0000000000000001 --output kernel.macho.adt
 bash unixnu-nabu-gh/scripts/make-cust-payload.sh kernel.macho kernel.macho.adt cust-payload.img
-# 刷前确认 Sending 'cust' (65536 KB)，别被截断
+```
+`kernel.macho` 用 CI 产物 `C:\Temp\nabu-ok\kernel\kernel.macho`（run `39612555624`）。
+
+**5c. 刷 + 启**（刷前确认 `Sending 'cust' (65536 KB)`，别被截断）
+```bash
 fastboot flash cust cust-payload.img
-fastboot boot C:\Users\Administrator\Desktop\unixnu-nabu-kernel-ufs\nabu-xnu64-T.img
+fastboot boot C:\Users\Administrator\Desktop\unixnu-nabu-kernel-ufs\nabu-xnu64-U.img
 ```
 **每次 boot 前先长按电源 10 秒重启**（坑 3）。
+
+**判读新增的"红块"信号**：若右上角（第 8 槽）出现红块，说明内核侧认为
+`Video` 布局仍然对不上 —— 那意味着固件没重编成功，而不是帧缓冲问题。
 
 方块语义（臂左上横条，从 `(32,32)` 起、间隔 64px）：
 
