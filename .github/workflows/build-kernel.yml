@@ -122,14 +122,10 @@ jobs:
 
         run: |
           cd UniXNU
-          # refer sources are fetched lazily by the build, so make them appear first
-          ./unixnu fetch xnu || true
-          ./unixnu tree || true
-          ls -la out/nabu/tree/refer/ || true
-          # The nabu early-checkpoint marks are injected by
-          # UniXNU/scripts/build-xnu-4k-baseline.sh itself, into .cache/xnu-work
-          # (the tree that is actually compiled) and only after patches/xnu/*.patch
-          # are applied. Injecting refer/xnu from here has no effect on the build.
+          # The tree was already assembled (and patched) by the "Assemble tree" step.
+          # Re-running `unixnu tree` here applied the patches a second time, failed on
+          # the ones that are not idempotent, and the `|| true` hid it -- leaving make to
+          # build a half-patched tree. Build the tree that was actually assembled.
           ./unixnu build kernel
           ls -lh out/nabu/kernel/ || true
         timeout-minutes: 180
