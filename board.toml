@@ -37,23 +37,24 @@ archives = [
 [payload.adt]
 tool = "scripts/make-nabu-adt.py"
 chip_id = "207"
-# TODO(measure): --dram-size must be the real observed DRAM size.
-# Xiaomi Pad 5 ships 6 GiB or 8 GiB; placeholder below is 6 GiB (0x180000000).
-# Confirm with: adb shell cat /proc/meminfo  (MemTotal)
+# Measured 2026-10-20 via TWRP: /proc/meminfo MemTotal = 11766512 kB
+# (12 GiB = 12582912 kB minus ~816 MB reserved for modem/hyp/rmtfs) => physical 12 GiB.
 owned_memory_size = "0x130000000"
-dram_size = "0x180000000"
+dram_size = "0x300000000"
 cpu_regs = "0,0x100,0x200,0x300,0x400,0x500,0x600,0x700"
 packed_data_ramdisk = true
 ipad_identity = true
 unique_chip_id = "required"          # the platform seed is not stored in any repository
 
 [userdata]
-# TODO(measure): first_lba / last_lba must come from the real GPT.
-# Placeholder below is NOT measured -- do not trust it.
-# Confirm with: adb shell cat /proc/partitions  (or: edl printgpt)
-# Observed userdata size from fastboot: 0x74167BB000 bytes; UFS LBA is 4096 bytes.
-first_lba = 0x2f3840
-last_lba = 0x3d0abfa
+# Measured 2026-10-20 via TWRP sysfs (device has an upgraded/larger UFS):
+#   /sys/block/sda/sda31 (userdata) start = 21234176 sectors of 512 bytes
+#   -> first_lba = 21234176 / 8 = 2654272 = 0x288C40   (UFS LBA is 4096 bytes)
+#   size = 973815256 sectors -> 121726907 LBA = 0x74167BB
+#   -> last_lba = first_lba + 121726907 - 1 = 124381178 = 0x77BF3FA
+# Cross-checked against fastboot partition-size:userdata = 0x74167BB000 bytes (matches).
+first_lba = 0x288C40
+last_lba = 0x77BF3FA
 lba_bytes = 4096
 windows = [
   { name = "OS", component = "OS" },
