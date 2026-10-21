@@ -190,6 +190,13 @@ fastboot boot nabu-xnu.img     # boot.img = BootShim + FD(3MB) + 64MB ramdisk
 
 ## 五、下一步
 
+> **当前第一嫌疑：起始异常级别不匹配。**
+> 实测 DarwinBoot 在 **EL1** 交付内核（探针 `EL=4`），而苹果真实链路是
+> **iBoot 在 EL2 交付、XNU 自己降到 EL1**。若内核早期访问 EL2 系统寄存器
+> 就会静默 fault —— 这与"视频参数已正确、内核却一个字都不打印"完全吻合。
+> 详见 `docs/early-console-plan.md` 末尾的实测进展。
+
+
 > 顺序：先做**早期 console 走帧缓冲**（`docs/early-console-plan.md`），
 > 拿到屏幕上的 panic 输出；再做 PMGR（`docs/pmgr-plan.md`）。
 

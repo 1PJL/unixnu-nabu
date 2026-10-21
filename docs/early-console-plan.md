@@ -71,3 +71,65 @@ scripts/nabu-early-fb-console/
 这是**前置项**：没有早期输出，PMGR 每一步都是盲改。
 console 打通后，PMGR 的调试循环变成：
 改 `NabuPlatformPower.cpp` → 编 → boot → 屏幕上直接看到读到的电压/时钟值。
+
+---
+
+## 实测进展（2026-10-21 19:49）
+
+### 已修复：视频数组错位（真凶之一）
+
+`DarwinBootPkg/Driver/BootVideo.h` 原来把 `boot_args.Video[6]` 写成了
+
+```
+[0]=base  [1]=1  [2]=rowBytes  [3]=width  [4]=height  [5]=32
+```
+
+而 XNU（`pexpert/arm/pe_init.c:425`）期望
+
+```
+[0]=base  [1]=rowBytes  [2]=width  [3]=height  [4]=depth  [5]=display
+```
+
+→ 内核读到 `rowBytes=1 / width=6400 / height=1600 / depth=2560`，
+`initialize_screen()` 判定失败 → **静默切回串口** → 屏幕永远没有内核输出。
+
+已修正为正确布局（并同步修正 DarwinBoot 自己绘制文字时的下标）。
+修正后实测：`base=0x50000000 row=6400 width=1600 height=2560 depth=32 display=0` ✅
+
+### 但仍无内核输出 → 内核死在 `PE_create_console` 之前
+
+`osfmk/arm/arm_init.c:616` 的 `PE_create_console()` 是第一个可能出字的点。
+视频参数已完全正确却仍无输出，说明**没走到那里**。
+
+## 当前第一嫌疑：起始异常级别（EL）不匹配
+
+| 事实 | 说明 |
+|---|---|
+| DarwinBoot 探针实测 `EL=4`（= EL1） | 我们现在**在 EL1** 交付内核 |
+| DarwinBoot 源码要求 `DarwinCurrentEl() == 4` | 它强制 EL1 |
+| 苹果真实链路 | **iBoot 在 EL2 交付，XNU 自己降到 EL1** |
+
+XNU 的 `arm_init` / `arm_start` 早期会访问 EL2 相关系统寄存器
+（`HCR_EL2`、`VTCR_EL2`、`VHE` 等）。**若内核以为自己在 EL2 而实际在 EL1，
+第一条相关指令就触发异常，且此时任何 console 都还没初始化 → 静默死亡。**
+这与观察完全一致：视频参数正确、内核入口代码执行了、却一个字都没有。
+
+### 验证方法（下一步，二选一）
+
+**A. 让内核自己说**（最直接）
+在 `osfmk/arm/arm_init.c` 的 `arm_init()` 第一行注入一个自包含的
+帧缓冲 putc（只写 `boot_args_ptr->Video` 指向的显存，不依赖任何 console）：
+
+```c
+nabu_fb_early_init(boot_args_ptr->Video);
+nabu_fb_early_puts("arm_init enter\n");
+```
+再在 `machine_startup`、`PE_init_platform`、`PE_create_console` 前后各打一个标记，
+就能精确看到内核走到第几行。
+
+**B. 改 DarwinBoot 在 EL2 交付**
+把 `DarwinCurrentEl() != 4` 的判断改成允许 EL2（或直接去掉），
+让内核按苹果真实链路从 EL2 起步。风险：DarwinBoot 本身当前跑在 EL1，
+要让它把控制权交给 EL2 需要额外做 EL 切换（`eret` 到 EL2），改动更大。
+
+> 建议先做 A（信息量最大、风险最低），确认死点后再决定是否需要 B。
