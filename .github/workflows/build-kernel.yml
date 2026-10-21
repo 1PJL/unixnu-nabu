@@ -103,6 +103,22 @@ jobs:
             -o ".cache/sources/xnu-trustcache-$TSHORT.json"
           echo "=== cached json ==="
           ls -la .cache/sources/
+      - name: Probe drivers (which sources exist)
+        run: |
+          cd UniXNU
+          echo "=== drivers 目录 ==="
+          ls drivers/ 2>/dev/null || echo "(no drivers dir)"
+          for d in drivers/*/; do
+            n=$(basename "$d")
+            c=$(ls "$d"*.cpp 2>/dev/null | head -1)
+            h=$(ls "$d"*.h 2>/dev/null | head -1)
+            echo "$n: cpp=${c:-NONE} h=${h:-NONE}"
+          done
+          echo "=== NativeUfs 详细 ==="
+          ls -la drivers/NativeUfs/ 2>/dev/null || echo "NativeUfs MISSING/EMPTY"
+          echo "=== 搜 GccUfs.h ==="
+          find . -name "GccUfs.h" 2>/dev/null || echo "GccUfs.h NOT FOUND"
+
       - name: Build kernel
         run: |
           cd UniXNU
