@@ -161,6 +161,15 @@ jobs:
           tail -250 UniXNU/out/nabu/logs/kernel.log 2>/dev/null || echo "(missing)"
           echo "===== kernel-bootstrap.log (record pass) ====="
           tail -60 UniXNU/out/nabu/logs/kernel-bootstrap.log 2>/dev/null || echo "(missing)"
+          echo "===== where LDFILELIST is defined ====="
+          cd UniXNU/out/nabu/tree/.cache/xnu-work 2>/dev/null && \
+            grep -rn 'LDFILELIST' --include=Makefile* --include=*.cmd --include=*.def --include=*.top . 2>/dev/null | head -20
+          echo "===== bsd filelist inputs present? ====="
+          cd "$GITHUB_WORKSPACE/UniXNU/out/nabu/tree/.cache/xnu-work" 2>/dev/null && {
+            ls -la bsd/conf/ 2>/dev/null | head -10
+            echo "--- resolved bsd sources ---"
+            ls build/obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/*.o 2>/dev/null | wc -l
+          }
 
       - name: Upload artifacts
         if: always()
