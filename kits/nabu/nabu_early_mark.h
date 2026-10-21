@@ -18,5 +18,6 @@
 
 // 标记编号 → 颜色（高对比，便于拍照辨认）
 // 1 白 2 黄 3 青 4 绿 5 品红 6 橙 7 蓝 8 红(仅用于报错)
-void nabu_mark_init(const uint64_t video[6]);
+void nabu_mark_init(const uint64_t *video);
+#define NABU_MARK(n) nabu_mark(n)
 void nabu_mark(int n);
