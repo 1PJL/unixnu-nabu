@@ -83,7 +83,10 @@ roots = [
   "com.apple.iokit.IOMobileGraphicsFamily",
   "com.apple.iokit.IOReportFamily",
   "com.apple.iokit.IOStorageFamily",
-  "com.apple.iokit.IOSurface",
+  # Removed com.apple.iokit.IOSurface: both it and IOGPUFamily pull in
+  # IOSurfaceFamily, so prelink packs that kext twice and OSMetaClass panics with
+  # "Kext ... class ... is a duplicate". IOGPUFamily still brings IOSurfaceFamily
+  # in once, which is enough for the graphics stack.
   "com.apple.kec.Libm",
   "com.apple.kec.corecrypto",
   "com.apple.kext.AppleMatch",
