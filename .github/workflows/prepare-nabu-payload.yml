@@ -1,4 +1,4 @@
-name: Prepare nabu early kernel payload
+name: Prepare nabu post64 payload
 
 on:
   push:
@@ -26,8 +26,8 @@ jobs:
       - name: Download previously checked kernel
         uses: actions/download-artifact@v4
         with:
-          name: kernel-nabu
-          run-id: 39769932689
+          name: kernel-nabu-post64
+          run-id: 39808774104
           github-token: ${{ github.token }}
           path: kernel-input
 
@@ -45,7 +45,7 @@ jobs:
           assert len(candidates) == 1, 'Expected exactly one kernel.macho'
           source = candidates[0]
           data = source.read_bytes()
-          expected = '174aaf705a81c098e14f0048e04b311f8d4df5eedefc69244ba5aeaee8956138'
+          expected = '1b2721ccc2973d0cb93e58fb5cfdb71815bf9cdb5d9b591965dec8ff13417a04'
           assert hashlib.sha256(data).hexdigest() == expected, 'Kernel differs from checked artifact'
           magic, cpu, subtype, filetype, count, command_bytes = struct.unpack_from('<6I', data)
           assert (magic, cpu, subtype, filetype) == (0xfeedfacf, 0x100000c, 0, 2)
@@ -85,11 +85,29 @@ jobs:
           target.mkdir(parents=True)
           shutil.copyfile(source, target / 'kernel.macho')
           Path('payload-output').mkdir()
+          mappings = list(Path('kernel-input').rglob('post64-checkpoints.json'))
+          assert len(mappings) == 1, 'Expected the post64 checkpoint mapping'
+          shutil.copyfile(mappings[0], 'payload-output/post64-checkpoints.json')
+          # Verify the new state variable is present in the linked symbol table.
+          offset = 32
+          found = False
+          for _ in range(count):
+              command, length = struct.unpack_from('<II', data, offset)
+              if command == 2:
+                  symoff, nsyms, stroff, strsize = struct.unpack_from('<4I', data, offset + 8)
+                  strings = data[stroff:stroff+strsize]
+                  index = strings.find(b'_g_last_hit\0')
+                  if index >= 0:
+                      found = any(i == index and t & 0x0e == 0x0e
+                                  for i, t, section, desc, value in struct.iter_unpack(
+                                      '<IBBHQ', data[symoff:symoff+nsyms*16]))
+              offset += length
+          assert found, 'Post64 diagnostic state is missing from the kernel'
           report = {
               'purpose': 'Early XNU experiment; no iPadOS userspace or root filesystem',
               'runtime_qualified': False,
               'abi_qualified': False,
-              'kernel_source_run': 39769932689,
+              'kernel_source_run': 39808774104,
               'kernel_sha256': expected,
               'kernel_virtual_span_bytes': limit - base,
               'device_dram_bytes': 0x180000000,
@@ -125,7 +143,7 @@ jobs:
           [kits]
           autoload = false
           [ui]
-          title = "nabu early XNU test"
+          title = "nabu post64 diagnostics"
           logo = true
           console = "auto"
           [[entry]]
@@ -156,7 +174,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          IMAGE="$GITHUB_WORKSPACE/payload-output/nabu-cust-payload.img"
+          IMAGE="$GITHUB_WORKSPACE/payload-output/nabu-cust-payload-post64.img"
           truncate -s 64M "$IMAGE"
           mkfs.vfat -F 16 -n NABUXNU "$IMAGE"
           mcopy -i "$IMAGE" -s stage/EFI ::/
@@ -171,7 +189,7 @@ jobs:
           import struct
           from pathlib import Path
 
-          image = Path('payload-output/nabu-cust-payload.img')
+          image = Path('payload-output/nabu-cust-payload-post64.img')
           assert image.stat().st_size == 64 * 1024 * 1024
           tree = Path('stage/EFI/UniXNU/Payloads/kernel.macho.adt').read_bytes()
           nodes = {}
@@ -211,7 +229,7 @@ jobs:
       - name: Upload payload for review
         uses: actions/upload-artifact@v4
         with:
-          name: nabu-early-kernel-payload
+          name: nabu-post64-kernel-payload
           if-no-files-found: error
           compression-level: 6
           path: payload-output/
