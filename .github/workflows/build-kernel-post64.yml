@@ -115,7 +115,9 @@ jobs:
           import json
           import os
           
-          path = Path('UniXNU/out/nabu/tree/scripts/build-xnu-4k-baseline.sh')
+          # cmd_build() calls prepare()/tree.assemble() again. Patch the source
+          # script so reassembly cannot copy an unmodified script over our probes.
+          path = Path('UniXNU/scripts/build-xnu-4k-baseline.sh')
           text = path.read_text()
           
           def replace_once(old, new):
@@ -194,6 +196,9 @@ jobs:
           block = text.split("<<'MKP'\n", 1)[1].split('\nMKP\n', 1)[0]
           ast.parse(block)
           path.write_text(text)
+          assembled = Path('UniXNU/out/nabu/tree/scripts/build-xnu-4k-baseline.sh')
+          assembled.write_text(text)
+          assert path.read_bytes() == assembled.read_bytes()
           
           mapping = {
               'display': 'Latest checkpoint is the large number ABOVE the colour strip; lower numbers are older helper readouts',
