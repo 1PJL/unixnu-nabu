@@ -1,0 +1,119 @@
+name: Build UEFI for nabu
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CLANGPDB_AARCH64_PREFIX: aarch64-linux-gnu-
+      PYTHONUNBUFFERED: "1"
+    defaults:
+      run:
+        shell: bash
+        working-directory: Mu-Silicium
+    steps:
+      - name: Check out pinned Mu-Silicium source
+        uses: actions/checkout@v4
+        with:
+          repository: Project-Silicium/Mu-Silicium
+          ref: 42fe563791e51bf5500c2e470ed294ca0c94b97c
+          path: Mu-Silicium
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential mono-devel lld uuid-dev nasm \
+            gcc-aarch64-linux-gnu python3 python3-venv python3-pip \
+            python3-git gettext locales gnupg ca-certificates git clang llvm curl
+          python3 -m venv "$RUNNER_TEMP/nabu-uefi-venv"
+          "$RUNNER_TEMP/nabu-uefi-venv/bin/python" -m pip install -r pip-requirements.txt
+          echo "$RUNNER_TEMP/nabu-uefi-venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$RUNNER_TEMP/nabu-uefi-venv" >> "$GITHUB_ENV"
+
+      - name: Record source versions
+        run: |
+          {
+            echo 'Diagnostic UEFI build for Xiaomi Pad 5 (nabu).'
+            echo 'This artifact does not contain iPadOS or the XNU kernel.'
+            git rev-parse HEAD
+            git submodule status --recursive
+            python3 --version
+            clang --version
+          } > "$GITHUB_WORKSPACE/uefi-sources.txt"
+
+      - name: Build nabu DEBUG firmware
+        run: |
+          set -o pipefail
+          python3 build_uefi.py -d nabu -r DEBUG 2>&1 | tee "$GITHUB_WORKSPACE/uefi-build.log"
+
+      - name: Verify output structure
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import struct
+          from pathlib import Path
+
+          image = Path('Mu-nabu.img')
+          firmware = Path('Build/nabuPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd')
+          data = image.read_bytes()
+          assert data[:8] == b'ANDROID!', 'Not an Android boot image'
+          kernel_size = struct.unpack_from('<I', data, 8)[0]
+          page_size = struct.unpack_from('<I', data, 36)[0]
+          header_version = struct.unpack_from('<I', data, 40)[0]
+          assert header_version == 1, f'Unexpected header version: {header_version}'
+          assert page_size >= 2048 and page_size & (page_size - 1) == 0
+          assert kernel_size > 0 and page_size + kernel_size <= len(data)
+          assert len(data) <= 128 * 1024 * 1024, 'Image exceeds stock boot partition size'
+          assert firmware.stat().st_size == 0x300000, 'Unexpected firmware volume size'
+          report = {
+              'device': 'nabu',
+              'purpose': 'diagnostic UEFI; no XNU or iPadOS included',
+              'runtime_tested': False,
+              'boot_header_version': header_version,
+              'boot_page_size': page_size,
+              'files': {
+                  str(p): {
+                      'bytes': p.stat().st_size,
+                      'sha256': hashlib.sha256(p.read_bytes()).hexdigest(),
+                  }
+                  for p in (image, firmware, Path('Resources/DTBs/nabu.dtb'))
+              },
+          }
+          output = json.dumps(report, indent=2) + '\n'
+          Path(os.environ['GITHUB_WORKSPACE'], 'uefi-manifest.json').write_text(output)
+          print(output)
+          PY
+
+      - name: Upload firmware and manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: uefi-nabu-debug
+          if-no-files-found: error
+          path: |
+            Mu-Silicium/Mu-nabu.img
+            Mu-Silicium/Build/nabuPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd
+            Mu-Silicium/Resources/DTBs/nabu.dtb
+            uefi-manifest.json
+            uefi-sources.txt
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uefi-nabu-logs
+          if-no-files-found: warn
+          path: |
+            uefi-build.log
+            uefi-sources.txt
+            Mu-Silicium/Build/BUILDLOG*
