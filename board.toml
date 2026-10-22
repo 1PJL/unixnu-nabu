@@ -79,6 +79,12 @@ roots = [
   "com.apple.driver.IODARTFamily",
   "com.apple.filesystems.apfs",
   "com.apple.iokit.IOCryptoAcceleratorFamily",
+  # The boot log now reaches "IOsurfaceRoot:installMemoryRegions()" and stops, so
+  # IOSurface is needed. It was removed earlier to avoid duplicating
+  # IOSurfaceFamily; with IOMobileGraphicsFamily already dropped, only IOGPUFamily
+  # pulls that dependency, so adding IOSurface back should not reintroduce the
+  # duplicate OSMetaClass registration.
+  "com.apple.iokit.IOSurface",
   "com.apple.iokit.IOGPUFamily",
   # Removed com.apple.iokit.IOMobileGraphicsFamily: it and IOGPUFamily both depend on
   # IOSurfaceFamily, and native_prelink.plan() uses a plain list for its work queue,
