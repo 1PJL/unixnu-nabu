@@ -1,6 +1,9 @@
 name: Prepare nabu early kernel payload
 
 on:
+  push:
+    paths:
+      - .github/workflows/prepare-nabu-payload.yml
   workflow_dispatch:
 
 permissions:
