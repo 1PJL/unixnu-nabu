@@ -588,3 +588,64 @@ reply 解析异常，应优先怀疑此处。
 - `draw_number` 必须画前擦格，否则十位残留（50 会被读成 54/58）
 - 单一数字放不下信息：mach 启动表有 1736 条（`subsystem <= 14`），ZALLOC 独占 767 条，
   已改为「子系统 + 条目序号」双格，再升级为 `nabu_mark_quad` 四格
+---
+
+## 14. 越过 mach IPC：内核进入 IOKit kext 加载
+
+### 里程碑
+
+今天第一次通过 `kernel_startup_initialize_upto(STARTUP_SUB_MACH_IPC)`。
+之前的结论（"停在 mig_init 的 kroutine panic"）是对的，但**只是第一层**。
+
+### 完整死因链（每一层都有屏幕读数支撑）
+
+| 层 | 现象 | 证据 | 处置 |
+|---|---|---|---|
+| 1 | `panic("kroutine must have precise size")` | i=0/j=0 → `mach_vm_allocate`，`max_reply_msg=0` | 回退到子系统 `maxsize` |
+| 2 | 收尾 `printf` 触发 kprintf | 移除后仍停 | 删掉该诊断 printf |
+| 3 | `assert3u(grp,<,TASK_GRP_COUNT)` 误判 | 面板 `line=283 x=120675180 y=32` | 实为下一层 |
+| 4 | **`reply_descr_count <= IPC_KOBJECT_RDESC_MAX`** | 断言原文 + `x=120675180`（指针低位）、`y=32` | **关掉两个描述符计数断言** |
+| 5 | **`OSMetaClass: Kext %s class %s is a duplicate`** | 绿字原文 | 当前问题（prelink 层）|
+
+第 4 层是真凶：`kern_routine_descriptor` 的字段偏移与本构建不符，
+`reply_descr_count` 读到了指针低位（0x731_4xxx），断言必然失败。
+这也解释了此前所有静态 dump「布局怎么算都对不上」。
+
+### 观测手段的演进（关键工程收获）
+
+1. **物理 framebuffer 自映射**：`nabu_mark_map()`，在 `arm_vm_init` 之后可用
+2. **方块 / 数字探针**：早期靠这个定位到 `mig_init`
+3. **5x7 字库 + `nabu_mark_text()`**：直接把 panic 格式串画到屏幕
+4. **panic 钩子解析 varargs**：画出断言表达式、行号、x/y 实际值
+5. 探针全部下移到屏幕下半部（`y≈1000+`），把上半部留给 console/文本
+
+> 经验：**别再用两位数格子猜数值**。`x=5180/y=32` 是误读，
+> 实际 `x=120675180/y=32`，结论完全不同。用 `nabu_mark_num()` 打印十进制文本。
+
+### 试过但无效的路
+
+- **early console**（`arm_init` 里调 `PE_init_printf(TRUE)`）：
+  `vcattach` 半初始化，随后 `gc_update_color` 撞 `assert(gc_ops.update_color)`
+  （`video_console.c:1226`）——自伤，已移除
+- **跨 boot RAM 传递**：DRAM 重启不保留，`keep probe` 第二次仍是 `fresh RAM`
+- **UART 串口**：xnu 有 `serial_console` 框架，但缺平台 UART 基址 + 需要硬件接线
+- **USB 日志**（Pagani/giulia 的做法）：进入用户态后才有，早期无用
+
+### 构建管线的坑（浪费了十几轮）
+
+- `unixnu tree` 已应用 patch，构建脚本又应用一遍 → `patch does not apply`，
+  且错误被 `|| true` 吞掉。**修法：patch 前 `git reset --hard` + `clean -fdq`**
+- `source-machine-layer.patch` 往 `files.arm64` 加了 4 个 `amcc_rorgn_*.c`，
+  这些文件在 10063 里不存在 → 文件列表阶段 `Error 2` 无诊断
+- `pexpert/arm/` 没有 osfmk include root，`<arm/nabu_early_mark.h>` 解析失败，
+  必须用 `"../../osfmk/arm/nabu_early_mark.h"`
+- 内核里**没有 `strstr`**，链接会失败；用字面前缀比较替代
+- 注入代码引用 `nabu_early_mark.c` 的 `static` 变量（如 `g_h`）会编译失败，
+  只能用固定坐标
+
+### 当前问题
+
+`OSMetaClass: Kext %s class %s is a duplicate; kext %s already has a class with this name`
+
+IOKit 初始化时报 kext 类名重复。属于 **prelink 打包**（`kits/NativePrelink` 子模块）
+层面的问题，不是内核逻辑。下一步：读出重复的 kext 名，核对 prelink 清单。
