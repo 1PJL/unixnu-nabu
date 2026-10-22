@@ -3,17 +3,20 @@ name: build-xnu-kernel
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: macos-14
     timeout-minutes: 350
     env:
-      GITHUB_TOKEN: ${{ secrets.GH_PAT }}
       UNIXNU_DEBUG_LDFILELIST: "1"
       XNU_MAKE_V: "1"
-      GH_TOKEN: ${{ secrets.GH_PAT }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Select Xcode 16
         run: |
@@ -43,7 +46,12 @@ jobs:
 
       - name: Clone UniXNU
         run: |
-          git clone --recurse-submodules --depth 1 --shallow-submodules https://github.com/Lux12138/UniXNU.git UniXNU
+          git init UniXNU
+          git -C UniXNU remote add origin https://github.com/Lux12138/UniXNU.git
+          git -C UniXNU fetch --depth 1 origin eafa7e11ee63ac6a87b4a16019f51bcc1a980bb2
+          git -C UniXNU checkout --detach FETCH_HEAD
+          git -C UniXNU submodule update --init --recursive --depth 1
+          git -C UniXNU rev-parse HEAD
 
       - name: Select defconfig
         run: |
@@ -63,31 +71,9 @@ jobs:
         run: cd UniXNU && ./unixnu tree
         timeout-minutes: 30
 
-      - name: Inject GITHUB_TOKEN into API scripts
-        run: |
-          cd UniXNU/out/nabu/tree
-          python3 - <<'PY'
-          from pathlib import Path
-          import os, glob
-          token = os.environ.get("GITHUB_TOKEN", "")
-          print("token present:", bool(token))
-          patched = 0
-          for f in glob.glob("scripts/*.py"):
-              p = Path(f)
-              s = p.read_text()
-              if "api.github.com" not in s or "_UNIXNU_TOKEN_PATCH" in s:
-                  continue
-              if "import urllib.request" not in s:
-                  continue
-              patch = "import urllib.request\n_gh_token = __import__(\"os\").environ.get(\"GITHUB_TOKEN\", \"\")\nif _gh_token:\n    _orig_urlopen = urllib.request.urlopen\n    def _urlopen(url, *a, **kw):\n        req = urllib.request.Request(url) if isinstance(url, str) else url\n        req.add_header(\"Authorization\", \"Bearer \" + _gh_token)\n        req.add_header(\"Accept\", \"application/vnd.github+json\")\n        return _orig_urlopen(req, *a, **kw)\n    urllib.request.urlopen = _urlopen"
-              s = s.replace("import urllib.request", patch, 1)
-              p.write_text(s)
-              patched += 1
-              print("patched:", f)
-          print("total:", patched)
-          PY
-
-      - name: Pre-cache XNU headers to /tmp (no API calls during build)
+      - name: Pre-cache XNU headers
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           cd UniXNU/out/nabu/tree
           mkdir -p .cache/sources
@@ -96,13 +82,13 @@ jobs:
           SHORT=${TAG#xnu-}
           TSHORT=${TRUST_TAG#xnu-}
           echo "TAG=$TAG TRUST_TAG=$TRUST_TAG"
-          curl -sL --fail -H "Authorization: Bearer ${{ secrets.GH_PAT }}" -H "Accept: application/vnd.github+json" \
+          curl -sL --fail -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/apple-oss-distributions/xnu/contents/iokit/DriverKit?ref=$TAG" \
             -o ".cache/sources/xnu-driverkit-$SHORT.json"
-          curl -sL --fail -H "Authorization: Bearer ${{ secrets.GH_PAT }}" -H "Accept: application/vnd.github+json" \
+          curl -sL --fail -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/apple-oss-distributions/xnu/contents/iokit/DriverKit/crypto?ref=$TAG" \
             -o ".cache/sources/xnu-driverkit-crypto-$SHORT.json"
-          curl -sL --fail -H "Authorization: Bearer ${{ secrets.GH_PAT }}" -H "Accept: application/vnd.github+json" \
+          curl -sL --fail -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/apple-oss-distributions/xnu/contents/EXTERNAL_HEADERS/TrustCache?ref=$TRUST_TAG" \
             -o ".cache/sources/xnu-trustcache-$TSHORT.json"
           echo "=== cached json ==="
