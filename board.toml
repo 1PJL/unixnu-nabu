@@ -92,6 +92,10 @@ roots = [
   # IOSurfaceFamily, so prelink packs that kext twice and OSMetaClass panics with
   # "Kext ... class ... is a duplicate". IOGPUFamily still brings IOSurfaceFamily
   # in once, which is enough for the graphics stack.
+  # pthread_shims.c aborts with "pthread kernel extension not loaded (function table)"
+  # unless com.apple.kec.pthread is prelinked: it supplies the pthread function table
+  # the shims call through.
+  "com.apple.kec.pthread",
   "com.apple.kec.Libm",
   "com.apple.kec.corecrypto",
   "com.apple.kext.AppleMatch",
