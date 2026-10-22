@@ -1,0 +1,218 @@
+name: Build DarwinBoot check for nabu
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CLANGPDB_AARCH64_PREFIX: aarch64-linux-gnu-
+      PYTHONUNBUFFERED: "1"
+    defaults:
+      run:
+        shell: bash
+        working-directory: Mu-Silicium
+    steps:
+      - name: Check out pinned Mu-Silicium source
+        uses: actions/checkout@v4
+        with:
+          repository: Project-Silicium/Mu-Silicium
+          ref: 42fe563791e51bf5500c2e470ed294ca0c94b97c
+          path: Mu-Silicium
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Check out pinned UniXNU menu source
+        uses: actions/checkout@v4
+        with:
+          repository: Lux12138/UniXNU
+          ref: 48ea812633d59b796dee3dc0781b9e174075f457
+          path: Mu-Silicium/UniXNU-source
+          persist-credentials: false
+
+      - name: Check out matching DarwinBoot source
+        uses: actions/checkout@v4
+        with:
+          repository: UniXNU/DarwinBoot
+          ref: 12bc9e23fb5f9a7d2715a9e30c021a883db0a310
+          path: Mu-Silicium/DarwinBoot-source
+          persist-credentials: false
+
+      - name: Integrate menu into nabu firmware
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import shutil
+
+          def replace_once(path, old, new):
+              text = path.read_text()
+              assert text.count(old) == 1, f'Unexpected source layout: {path}'
+              path.write_text(text.replace(old, new, 1))
+
+          shutil.copytree('UniXNU-source/package/UniXNUPkg', 'UniXNUPkg')
+          shutil.copytree('DarwinBoot-source/DarwinBootPkg', 'DarwinBootPkg')
+          board = Path('Platforms/Xiaomi/nabuPkg')
+          replace_once(board / 'DeviceBuild.py', '    PackagesPath = (',
+                       '    PackagesPath = (\n        ".",')
+          dsc = board / 'nabu.dsc'
+          with dsc.open('a') as f:
+              f.write('\n[LibraryClasses]\n'
+                      '  UniXNULib|UniXNUPkg/Library/UniXNULib/UniXNULib.inf\n'
+                      '[Components]\n'
+                      '  UniXNUPkg/Application/UniXNU/UniXNU.inf\n'
+                      '  UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf\n'
+                      '  DarwinBootPkg/Driver/DarwinBoot.inf\n')
+          replace_once(board / 'nabu.fdf', '  !include Include/RAW.inc',
+                       '  !include Include/RAW.inc\n'
+                       '  INF UniXNUPkg/Application/UniXNU/UniXNU.inf\n'
+                       '  INF UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf\n'
+                       '  INF DarwinBootPkg/Driver/DarwinBoot.inf')
+          replace_once(board / 'Include/APRIORI.inc', '}',
+                       '  INF DarwinBootPkg/Driver/DarwinBoot.inf\n'
+                       '  INF UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.inf\n}')
+          # Give the user time to photograph the fallback menu.
+          config = Path('UniXNUPkg/Library/UniXNULib/Config.c')
+          replace_once(config, '"timeout = 10\\n"', '"timeout = 120\\n"')
+          replace_once(config, '"title = \\"UniXNU\\"\\n"',
+                       '"title = \\"UniXNU - DarwinBoot check\\"\\n"')
+          # Query the loader interface from the running menu, without calling Boot().
+          main = Path('UniXNUPkg/Library/UniXNULib/Main.c')
+          replace_once(main, '#include "Internal.h"',
+                       '#include "Internal.h"\n#include <Protocol/UniXNULoader.h>')
+          probe = '  {\n    UNIXNU_LOADER_PROTOCOL *Loader = NULL;\n    EFI_STATUS LoaderStatus;\n    LoaderStatus = gBS->LocateProtocol (&gUniXNULoaderProtocolGuid, NULL, (VOID **)&Loader);\n    if (!EFI_ERROR (LoaderStatus) &&\n        ((Loader == NULL) || (Loader->Boot == NULL) ||\n         ((Loader->Revision != UNIXNU_LOADER_REVISION_1) &&\n          (Loader->Revision != UNIXNU_LOADER_REVISION)))) {\n      LoaderStatus = EFI_UNSUPPORTED;\n    }\n    UnicodeSPrint (Ui.Info, sizeof (Ui.Info),\n                   L"DarwinBoot loader: %r | no kernel staged", LoaderStatus);\n    UniXNULog ("DarwinBoot interface check: %r", LoaderStatus);\n  }\n\n  Countdown = TRUE;'
+          replace_once(main, '  Countdown = TRUE;', probe)
+          print('DarwinBoot integration: interface check only; Boot() is not called.')
+          PYCODE
+
+      - name: Cache Python downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: nabu-pip-${{ runner.os }}-${{ hashFiles('Mu-Silicium/pip-requirements.txt') }}
+
+      - name: Install build dependencies
+        run: |
+          # Use the Ubuntu archive instead of the Azure mirror that was slow previously.
+          python3 - <<'PYAPT'
+          from pathlib import Path
+          import subprocess
+          paths = [Path('/etc/apt/sources.list')]
+          paths += list(Path('/etc/apt/sources.list.d').glob('*.sources'))
+          paths += list(Path('/etc/apt/sources.list.d').glob('*.list'))
+          for path in paths:
+              if not path.is_file():
+                  continue
+              original = path.read_text()
+              updated = original.replace('azure.archive.ubuntu.com', 'archive.ubuntu.com')
+              if original != updated:
+                  subprocess.run(['sudo', 'tee', str(path)], input=updated, text=True,
+                                 stdout=subprocess.DEVNULL, check=True)
+          PYAPT
+          APT_DOWNLOAD_OPTS=(-o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo apt-get "${APT_DOWNLOAD_OPTS[@]}" update
+          sudo apt-get "${APT_DOWNLOAD_OPTS[@]}" install -y --no-install-recommends \
+            build-essential mono-devel lld uuid-dev nasm \
+            gcc-aarch64-linux-gnu python3 python3-venv python3-pip \
+            python3-git gettext locales gnupg ca-certificates git clang llvm curl
+          python3 -m venv "$RUNNER_TEMP/nabu-uefi-venv"
+          "$RUNNER_TEMP/nabu-uefi-venv/bin/python" -m pip install -r pip-requirements.txt
+          echo "$RUNNER_TEMP/nabu-uefi-venv/bin" >> "$GITHUB_PATH"
+          echo "VIRTUAL_ENV=$RUNNER_TEMP/nabu-uefi-venv" >> "$GITHUB_ENV"
+
+      - name: Record source versions
+        run: |
+          {
+            echo 'DarwinBoot interface check for Xiaomi Pad 5 (nabu).'
+            echo 'This artifact does not contain iPadOS or the XNU kernel.'
+            git -C DarwinBoot-source rev-parse HEAD
+            git -C UniXNU-source rev-parse HEAD
+            git diff -- Platforms/Xiaomi/nabuPkg
+            git rev-parse HEAD
+            git submodule status --recursive
+            python3 --version
+            clang --version
+          } > "$GITHUB_WORKSPACE/uefi-sources.txt"
+
+      - name: Build nabu DEBUG firmware
+        run: |
+          set -o pipefail
+          python3 build_uefi.py -d nabu -r DEBUG 2>&1 | tee "$GITHUB_WORKSPACE/uefi-build.log"
+
+      - name: Verify output structure
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import struct
+          from pathlib import Path
+
+          image = Path('Mu-nabu.img')
+          firmware = Path('Build/nabuPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd')
+          data = image.read_bytes()
+          assert data[:8] == b'ANDROID!', 'Not an Android boot image'
+          kernel_size = struct.unpack_from('<I', data, 8)[0]
+          page_size = struct.unpack_from('<I', data, 36)[0]
+          header_version = struct.unpack_from('<I', data, 40)[0]
+          assert header_version == 1, f'Unexpected header version: {header_version}'
+          assert page_size >= 2048 and page_size & (page_size - 1) == 0
+          assert kernel_size > 0 and page_size + kernel_size <= len(data)
+          assert len(data) <= 128 * 1024 * 1024, 'Image exceeds stock boot partition size'
+          assert firmware.stat().st_size == 0x300000, 'Unexpected firmware volume size'
+          programs = [Path('Build/nabuPkg/DEBUG_CLANGPDB/AARCH64') / name
+                      for name in ('UniXNU.efi', 'UniXNUDxe.efi', 'DarwinBoot.efi')]
+          for program in programs:
+              pe = program.read_bytes()
+              assert pe[:2] == b'MZ', f'Invalid executable: {program}'
+              offset = struct.unpack_from('<I', pe, 60)[0]
+              assert pe[offset:offset+4] == b'PE\0\0'
+              assert struct.unpack_from('<H', pe, offset+4)[0] == 0xaa64
+          report = {
+              'device': 'nabu',
+              'purpose': 'DarwinBoot interface check; no kernel or iPadOS included',
+              'runtime_tested': False,
+              'boot_header_version': header_version,
+              'boot_page_size': page_size,
+              'files': {
+                  str(p): {
+                      'bytes': p.stat().st_size,
+                      'sha256': hashlib.sha256(p.read_bytes()).hexdigest(),
+                  }
+                  for p in (image, firmware, Path('Resources/DTBs/nabu.dtb'), *programs)
+              },
+          }
+          output = json.dumps(report, indent=2) + '\n'
+          Path(os.environ['GITHUB_WORKSPACE'], 'uefi-manifest.json').write_text(output)
+          print(output)
+          PY
+
+      - name: Upload firmware and manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: unixnu-nabu-darwinboot
+          if-no-files-found: error
+          path: |
+            Mu-Silicium/Mu-nabu.img
+            Mu-Silicium/Build/nabuPkg/DEBUG_CLANGPDB/FV/SILICIUM_UEFI.fd
+            Mu-Silicium/Resources/DTBs/nabu.dtb
+            Mu-Silicium/Build/nabuPkg/DEBUG_CLANGPDB/AARCH64/UniXNU.efi
+            Mu-Silicium/Build/nabuPkg/DEBUG_CLANGPDB/AARCH64/UniXNUDxe.efi
+            Mu-Silicium/Build/nabuPkg/DEBUG_CLANGPDB/AARCH64/DarwinBoot.efi
+            uefi-manifest.json
+            uefi-sources.txt
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unixnu-nabu-darwinboot-logs
+          if-no-files-found: warn
+          path: |
+            uefi-build.log
+            uefi-sources.txt
+            Mu-Silicium/Build/BUILDLOG*
