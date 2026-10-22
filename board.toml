@@ -80,7 +80,10 @@ roots = [
   "com.apple.filesystems.apfs",
   "com.apple.iokit.IOCryptoAcceleratorFamily",
   "com.apple.iokit.IOGPUFamily",
-  "com.apple.iokit.IOMobileGraphicsFamily",
+  # Removed com.apple.iokit.IOMobileGraphicsFamily: it and IOGPUFamily both depend on
+  # IOSurfaceFamily, and native_prelink.plan() uses a plain list for its work queue,
+  # so the shared dependency is packed once per puller and OSMetaClass rejects the
+  # duplicate class. IOGPUFamily still pulls IOSurfaceFamily in a single time.
   "com.apple.iokit.IOReportFamily",
   # Removed com.apple.iokit.IOStorageFamily: it is already pulled in by
   # com.apple.filesystems.apfs, and native_prelink.plan() walks roots with a plain
