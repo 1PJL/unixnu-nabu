@@ -1,4 +1,4 @@
-name: Build nabu UFS NOP v1
+name: Build nabu UFS NOP v2
 
 on:
   push:
@@ -254,7 +254,7 @@ jobs:
           volatile unsigned int nabu_ufs_register_probe_hc_read = 0;
           volatile unsigned int nabu_ufs_survey_page = 0;
           volatile unsigned int nabu_ufs_survey_complete = 0;
-          __attribute__((used)) char nabu_ufs_register_probe_signature[] = "nabu-ufs-nop-v1";
+          __attribute__((used)) char nabu_ufs_register_probe_signature[] = "nabu-ufs-nop-v2";
           }
 
           class NativeUfs : public IOService {
@@ -386,7 +386,7 @@ jobs:
               memory[ucdOffset + responseOffset + i] = 0xa5;
           }
           // Every loop has a hard iteration bound independent of timer calibration.
-          // Port.delay() is 10 us on hardware; absolute times remain unqualified on nabu.
+          // Port.delay() is a finite CPU NOP loop on hardware; no wall-time claim.
           template<class Port>
           static bool waitBit(Port &p, unsigned offset, uint32_t mask, uint32_t expected)
           {
@@ -440,15 +440,24 @@ jobs:
             p.write(0x20, 1); // acknowledge ONLY old transfer completion, never errors
             r.phase = 3;
             r.submitted = true;
+            p.trace(10, 1); // before doorbell write (live trace is separate from global boot marks)
             p.write(0x58, 1); // the ONLY submission; no cancel/reset/retry/restore afterward
+            p.trace(11, 1); // MMIO store and its trailing DSB have returned
             for (unsigned i = 0; i < 100000; ++i) {
               ++r.polls;
-              r.doorbell = p.read(0x58); r.interrupt |= p.read(0x20);
+              p.trace(12, r.polls);
+              r.doorbell = p.read(0x58);
+              p.trace(13, r.doorbell);
+              r.interrupt |= p.read(0x20);
+              p.trace(14, r.interrupt);
               if (r.interrupt & errorMask) return End::TransferError;
               // Doorbell can clear before CPU observes that it was set. Require fresh OCS too.
               if (!r.doorbell) {
+                p.trace(15, r.polls);
                 p.fromDevice(); // invalidate ONLY, never write dirty lines over DMA results
+                p.trace(16, r.polls);
                 r.ocs = memory[8];
+                p.trace(17, r.ocs);
                 if (r.ocs != 15) {
                   r.phase = 4;
                   if (r.ocs != 0) return End::OcsError;
@@ -463,8 +472,11 @@ jobs:
                   return End::Passed;
                 }
               }
+              p.trace(18, r.polls);
               p.delay();
+              p.trace(19, r.polls);
             }
+            p.trace(21, r.polls);
             return End::TransferTimeout;
           }
           } // namespace NabuNop
@@ -548,17 +560,27 @@ jobs:
           struct HardwarePort {
             uintptr_t hc;
             uint32_t read(unsigned offset) { return readRegister(hc, offset); }
+            uint32_t seenTrace = 0;
+            void trace(unsigned step, uint32_t value) {
+              // Print each stage once. The global BSD 73 marker can change independently.
+              const uint32_t bit = 1U << step;
+              if (seenTrace & bit) return;
+              seenTrace |= bit;
+              nabu_ufs_register_probe_phase = step;
+              showHex("LIVE STEP", step, 1460);
+              showHex("LIVE VALUE", value, 1520);
+            }
             void write(unsigned offset, uint32_t value) {
-              if (offset == 0x58) {
-                nabu_mark_text("STAGE: SUBMIT ONE NOP OUT - DMA OWNED", 800);
-                nabu_ufs_register_probe_phase = 11;
-                nabu_mark(97);
-              }
               __asm__ volatile("dsb sy" ::: "memory");
               *reinterpret_cast<volatile uint32_t *>(hc + offset) = value;
               __asm__ volatile("dsb sy" ::: "memory");
             }
-            void delay() { IODelay(10); }
+            void delay() {
+              // Do not depend on the unqualified XNU timebase/IODelay implementation.
+              // This is pacing only; the hard bound is the core's iteration count.
+              for (unsigned i = 0; i < 64; ++i)
+                __asm__ volatile("nop" ::: "memory");
+            }
             bool mappingSafe() { return mappingUnchanged(); }
             void toDevice() {
               for (uintptr_t at = reinterpret_cast<uintptr_t>(dmaMemory),
@@ -585,12 +607,12 @@ jobs:
               case End::ExistingError: return "RESULT: HC ERROR - NO NOP SENT";
               case End::AutoHibernate: return "RESULT: AUTO HIBERNATE - NOP SKIPPED";
               case End::InterruptMask: return "RESULT: INTERRUPT MASK READBACK FAILED";
-              case End::StopTimeout: return "RESULT: QUEUE STOP TIMED OUT";
+              case End::StopTimeout: return "RESULT: QUEUE STOP POLL LIMIT";
               case End::BaseReadback: return "RESULT: OWN QUEUE BASE READBACK FAILED";
-              case End::StartTimeout: return "RESULT: OWN QUEUE START TIMED OUT";
+              case End::StartTimeout: return "RESULT: OWN QUEUE START POLL LIMIT";
               case End::LateBusy: return "RESULT: QUEUE BECAME BUSY - NOP SKIPPED";
               case End::TransferError: return "RESULT: NOP HC ERROR - DMA RETAINED";
-              case End::TransferTimeout: return "RESULT: NOP TIMED OUT - DMA RETAINED";
+              case End::TransferTimeout: return "RESULT: NOP POLL LIMIT - DMA RETAINED";
               case End::OcsError: return "RESULT: NOP OCS ERROR - DMA RETAINED";
               case End::ResponseType: return "RESULT: RESPONSE IS NOT NOP IN";
               case End::ResponseTag: return "RESULT: NOP RESPONSE TAG MISMATCH";
@@ -605,7 +627,7 @@ jobs:
             nabu_ufs_survey_page = 4;
             nabu_ufs_register_probe_phase = 1;
             nabu_mark(92);
-            nabu_mark_text("NABU UFS NOP V1 - SINGLE COMMAND", 680);
+            nabu_mark_text("NABU UFS NOP V2 - SINGLE COMMAND", 680);
             nabu_mark_text("NO SCSI - NO DISK DATA READ OR WRITE", 740);
             nabu_mark_text("STAGE: POWER AND CLOCK PREFLIGHT", 800);
             OSSharedPtr<IOMemoryMap> gccMap, hcMap, smmuMap;
@@ -649,6 +671,16 @@ jobs:
             if (!mappingUnchanged()) finish("RESULT: SMMU CHANGED BEFORE TAKEOVER");
             nabu_mark_text("STAGE: IDLE QUEUE TAKEOVER", 800);
             nabu_mark(95);
+            nabu_mark_text("STAGE: NOP TRANSPORT - SEE LIVE STEP", 800);
+            showHex("OWN DMA PA LO", static_cast<uint32_t>(dmaPhysical), 860);
+            showHex("OWN DMA PA HI", static_cast<uint32_t>(dmaPhysical >> 32), 920);
+            showHex("HC CAP BEFORE", port.read(0), 980);
+            showHex("HC VERSION BEFORE", port.read(8), 1040);
+            showHex("CACHE LINE BYTES", cacheLine, 1100);
+            showHex("CONTEXT FSR BEFORE", sr(mapping.context + 0x58), 1160);
+            showHex("DOORBELL BEFORE", port.read(0x58), 1220);
+            showHex("INT STATUS BEFORE", port.read(0x20), 1280);
+            showHex("GLOBAL GFSR BEFORE", sr(0x48), 1340);
             const NabuNop::End end = NabuNop::run(port, dmaMemory, dmaPhysical, report);
             nabu_mark(98);
             nabu_ufs_register_probe_phase = 12;
@@ -746,8 +778,7 @@ jobs:
               '93': 'Power and bus clocks passed; before SMMU route preflight',
               '94': 'Dedicated DMA allocation prepared and address bounds passed',
               '95': 'Before idle request-list takeover; no NOP has been submitted yet',
-              '97': 'Immediately before the single NOP doorbell store; own DMA allocation retained',
-              '98': 'NOP transport returned; preparing result display',
+                            '98': 'NOP transport returned; preparing result display',
               '96': 'Result display complete, including skips/failures; success requires RESULT CODE=0 and verified NOP IN',
           })
           p.write_text(json.dumps(m, indent=2) + '\n')
@@ -782,6 +813,10 @@ jobs:
             std::vector<std::pair<unsigned,uint32_t>> writes;
             bool published = false, submitted = false, sawTo = false;
             unsigned invalidates = 0, delays = 0, mapChecks = 0;
+            std::vector<unsigned> traces;
+            void trace(unsigned step,uint32_t) {
+              if (traces.empty() || traces.back()!=step) traces.push_back(step);
+            }
             Fake() { regs[0]=1U<<24;regs[0x08/4]=0x210;regs[0x30/4]=0x10f;regs[0x34/4]=1;regs[0x60/4]=1;regs[0x50/4]=0xabcd0000;regs[0x54/4]=2;regs[0x24/4]=0x30fff; }
             uint32_t read(unsigned o) {
               assert(o<sizeof(regs));
@@ -835,6 +870,11 @@ jobs:
             if(expected==End::TransferTimeout) { assert(r.polls==100000);assert(f.memory[8]==15); }
             if(expected==End::TransferError)assert(f.memory[8]==15);
             if(expected==End::Passed)assert(r.ocs==0 && r.response0==0x20000000 && r.response1==0 && r.response2==0);
+            if(r.submitted) {
+              assert(f.traces.size()>=2 && f.traces[0]==10 && f.traces[1]==11);
+              if(expected==End::TransferTimeout) assert(f.traces.back()==21);
+              if(expected==End::Passed) assert(f.invalidates>0);
+            }
             ++cases;
           }
           int main() {
@@ -1012,14 +1052,16 @@ jobs:
           for required in ('NativeUfs', 'nabu_ufs_register_probe_phase', 'nabu_ufs_register_probe_hc_read', 'nabu_ufs_survey_page', 'nabu_ufs_survey_complete'):
               assert required in symbols, 'Missing linked probe symbol: ' + required
           assert 'NativeUfsBlock' not in symbols
-          assert b'nabu-ufs-nop-v1\0' in data
+          assert b'nabu-ufs-nop-v2\0' in data
           assert b'NOP IN VERIFIED - NO DISK IO' in data
-          assert b'NABU UFS NOP V1 - SINGLE COMMAND' in data
+          assert b'NABU UFS NOP V2 - SINGLE COMMAND' in data
           source_text = source.read_text()
           assert source_text.count('p.write(0x58, 1);') == 1
           assert 'p.write(0x34' not in source_text and 'p.write(0x90' not in source_text
           assert 'pinnedDma->complete' not in source_text and 'pinnedDma->release' not in source_text
           assert 'dc civac' in source_text and 'dc ivac' in source_text
+          assert 'IODelay(' not in source_text
+          assert b'LIVE STEP\0' in data and b'LIVE VALUE\0' in data
           sha = hashlib.sha256(data).hexdigest()
           report = {
               'purpose': 'SM8150/nabu single NOP OUT/IN transport test; no SCSI or disk data IO',
@@ -1033,6 +1075,14 @@ jobs:
               'ufs_sid_reference': 'https://github.com/torvalds/linux/blob/v6.12/arch/arm64/boot/dts/qcom/sm8150.dtsi',
               'smmu_reference': 'https://github.com/torvalds/linux/blob/v6.12/drivers/iommu/arm/arm-smmu/arm-smmu.h',
               'runtime_qualified': False,
+              'live_step_codes': {
+                  '0A': 'Before doorbell write', '0B': 'Doorbell store and DSB returned',
+                  '0C': 'Before first doorbell read', '0D': 'Doorbell read returned; LIVE VALUE is DB',
+                  '0E': 'Interrupt-status read returned; LIVE VALUE is accumulated IS',
+                  '0F': 'Before invalidate-only DMA acquire', '10': 'DMA cache acquire returned',
+                  '11': 'OCS byte loaded; LIVE VALUE is OCS', '12': 'Before finite CPU pacing',
+                  '13': 'CPU pacing returned', '15': 'Transfer poll iteration limit reached',
+              },
               'scope_review': {
                   'controller_mmio_stores': 'Idle queue takeover: IE=0, UTRL stop/base/start, completion W1C=1 and one doorbell bit 0; no HCE reset, UIC commands or task-list changes',
                   'scsi_commands': 'None implemented',
@@ -1046,7 +1096,7 @@ jobs:
               },
               'linked_probe_object_symbol_checks': 'passed',
               'final_link_arguments_exclude_duplicate_storage_base': True,
-              'stop': '96 means result display complete; success only RESULT CODE=0, OCS=0, NOP IN response. 97 is just before doorbell; 98 is transport returned.',
+              'stop': '96 means result display complete; success requires code=0, OCS=0 and NOP IN; LIVE STEP is independent of global BSD marks. 98 means core returned.',
           }
           Path('ufs-nop.json').write_text(json.dumps(report, indent=2) + '\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
@@ -1255,7 +1305,7 @@ jobs:
           [kits]
           autoload = false
           [ui]
-          title = "nabu UFS NOP v1"
+          title = "nabu UFS NOP v2"
           logo = true
           console = "auto"
           [[entry]]
@@ -1265,7 +1315,7 @@ jobs:
           action = "exit"
           [[entry]]
           id = "nop"
-          title = "One NOP transport test - no disk data IO"
+          title = "One NOP test - live steps - no disk IO"
           type = "xnu"
           path = "Payloads/kernel.macho"
           args = "serial=3 -enable_kprintf_spam nabu-ufs-register-probe=1 nabu-ufs-nop=1"
