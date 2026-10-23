@@ -834,7 +834,7 @@ jobs:
             for (unsigned i = 0; i < n; ++i) crc = crcStep(crc, header && i >= 16 && i < 20 ? 0 : p[i]);
             return crc ^ 0xffffffffU;
           }
-          static End mbr(const uint8_t *data, uint64_t blocks)
+          static inline End mbr(const uint8_t *data, uint64_t blocks)
           {
             if (data[510] != 0x55 || data[511] != 0xaa) return End::ProtectiveMbr;
             unsigned protective = 0;
@@ -849,7 +849,7 @@ jobs:
             }
             return protective == 1 ? End::Passed : End::ProtectiveMbr;
           }
-          static End header(const uint8_t *data, uint64_t blocks, bool backup, Header &h)
+          static inline End header(const uint8_t *data, uint64_t blocks, bool backup, Header &h)
           {
             static const uint8_t signature[8] = {'E','F','I',' ','P','A','R','T'};
             if (!same(data, signature, 8)) return End::Signature;
@@ -883,7 +883,7 @@ jobs:
             }
             return End::Passed;
           }
-          static End partitions(Report &r)
+          static inline End partitions(Report &r)
           {
             const Header &h = r.primary;
             for (unsigned i = 0; i < h.count; ++i) {
@@ -1877,9 +1877,12 @@ jobs:
             // Check all guard positions, not just the immediately adjacent bytes.
             {alignas(4096) uint8_t memory[dmaBytes]={};
               build(memory,0x80000000,read0);assert(readGuards(memory));
-              for(unsigned i=0;i<guardBytes;++i)for(unsigned at: {dataOffset-guardBytes+i,dataOffset+4096+i}) {
-                memory[at]^=1;assert(!readGuards(memory));memory[at]^=1;
-              }++cases;
+              for(unsigned i=0;i<guardBytes;++i) {
+                for(unsigned at: {dataOffset-guardBytes+i,dataOffset+4096+i}) {
+                  memory[at]^=1;assert(!readGuards(memory));memory[at]^=1;
+                }
+              }
+              ++cases;
             }
             for(uint32_t lba: {1U,2U,0x01d3ffffU,0x80000000U,0xffffffffU}) {
               Fake f;f.expectedLba=lba;Report r;
