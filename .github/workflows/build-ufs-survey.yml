@@ -1,4 +1,4 @@
-name: Build nabu UFS survey v2
+name: Build nabu UFS survey v3
 
 on:
   push:
@@ -230,7 +230,7 @@ jobs:
           print('Post64 diagnostics prepared; no memory, driver or storage parameters changed.')
           POST64
 
-      - name: Install nabu UFS queue and SMMU survey v2
+      - name: Install nabu UFS queue and SMMU survey v3
         run: |
           cat > UniXNU/scripts/nabu-ufs-register-probe.cpp <<'PROBE_CPP'
           // SPDX-License-Identifier: BSD-2-Clause-Patent
@@ -250,7 +250,7 @@ jobs:
           volatile unsigned int nabu_ufs_register_probe_hc_read = 0;
           volatile unsigned int nabu_ufs_survey_page = 0;
           volatile unsigned int nabu_ufs_survey_complete = 0;
-          __attribute__((used)) char nabu_ufs_register_probe_signature[] = "nabu-ufs-survey-v2";
+          __attribute__((used)) char nabu_ufs_register_probe_signature[] = "nabu-ufs-survey-v3";
           }
 
           class NativeUfs : public IOService {
@@ -267,7 +267,7 @@ jobs:
             if (!PE_parse_boot_argn("nabu-ufs-register-probe", &enabled, sizeof(enabled)) || enabled != 1) {
               return 0;
             }
-            if (!PE_parse_boot_argn("nabu-ufs-survey", &page, sizeof(page)) || (page != 1 && page != 2)) {
+            if (!PE_parse_boot_argn("nabu-ufs-survey", &page, sizeof(page)) || (page != 1 && page != 2 && page != 3)) {
               return 0;
             }
             return static_cast<unsigned int>(page);
@@ -395,7 +395,7 @@ jobs:
             return readRegister(base, static_cast<unsigned int>(offset));
           }
 
-          [[noreturn]] static void smmuSurvey(void)
+          [[noreturn]] static void smmuSurvey(unsigned int page)
           {
             OSSharedPtr<IOMemoryMap> keep;
             nabu_mark_text("STAGE: SMMU REGISTER MAP", 800);
@@ -408,19 +408,19 @@ jobs:
             const uint32_t id0 = smmuRead(smmu, 0x20);
             const uint32_t id1 = smmuRead(smmu, 0x24);
             if (!id0 || id0 == 0xffffffffU || !id1 || id1 == 0xffffffffU) {
-              showHex("SMMU ID0", id0, 860);
-              showHex("SMMU ID1", id1, 920);
+              if (page != 3) showHex("SMMU ID0", id0, 860);
+              if (page != 3) showHex("SMMU ID1", id1, 920);
               finish("RESULT: INVALID IDS - SCAN SKIPPED");
             }
             const uint32_t scr0 = smmuRead(smmu, 0x00);
             const uint32_t gfsr = smmuRead(smmu, 0x48);
             const unsigned int count = id0 & 0xffU;
-            showHex("SMMU SCR0", scr0, 860);
-            showHex("SMMU ID0", id0, 920);
-            showHex("SMMU ID1", id1, 980);
-            showHex("SMMU GFSR", gfsr, 1040);
-            showHex("EXPECTED UFS SID", expectedUfsSid, 1100);
-            showHex("SMR ENTRY COUNT", count, 1160);
+            if (page != 3) showHex("SMMU SCR0", scr0, 860);
+            if (page != 3) showHex("SMMU ID0", id0, 920);
+            if (page != 3) showHex("SMMU ID1", id1, 980);
+            if (page != 3) showHex("SMMU GFSR", gfsr, 1040);
+            if (page != 3) showHex("EXPECTED UFS SID", expectedUfsSid, 1100);
+            if (page != 3) showHex("SMR ENTRY COUNT", count, 1160);
 
             // ID0.SMS selects stream matching. Extended-ID VALID moves from SMR[31]
             // to S2CR[10] only when both ID0.EXIDS and SCR0.EXIDENABLE are set.
@@ -451,10 +451,10 @@ jobs:
                 }
               }
             }
-            showHex("SID MATCH COUNT", matches, 1220);
-            showHex("FIRST MATCH INDEX", first, 1280);
-            showHex("MATCH SMR", firstSmr, 1340);
-            showHex("MATCH S2CR", firstS2cr, 1400);
+            if (page != 3) showHex("SID MATCH COUNT", matches, 1220);
+            if (page != 3) showHex("FIRST MATCH INDEX", first, 1280);
+            if (page != 3) showHex("MATCH SMR", firstSmr, 1340);
+            if (page != 3) showHex("MATCH S2CR", firstS2cr, 1400);
             if (!matches) {
               finish("RESULT: SID 0300 HAS NO VALID MATCH");
             }
@@ -474,10 +474,41 @@ jobs:
             const unsigned int globalPages = 1U << (((id1 >> 28) & 7U) + 1U);
             const unsigned int banks = id1 & 0xffU;
             const unsigned int bank = firstS2cr & 0xffU;
-            showHex("CONTEXT BANK", bank, 1460);
+            if (page != 3) showHex("CONTEXT BANK", bank, 1460);
             const uint64_t context = pageBytes * (static_cast<uint64_t>(globalPages) + bank);
-            if (!banks || bank >= banks || context > smmuWindow - 0x34ULL) {
+            if (!banks || bank >= banks || context > smmuWindow - 0x6cULL) {
               finish("RESULT: CONTEXT GEOMETRY OUT OF RANGE");
+            }
+            if (page == 3) {
+              // Linux arm-smmu.h: GR1 is one register page after GR0.
+              // FSR is read only here: do not acknowledge its write-one-to-clear bits.
+              // FAR is shown as two raw halves, not treated as a CPU physical address.
+              nabu_mark_text("STAGE: CONTEXT CONFIG AND FAULT READS", 800);
+              nabu_ufs_register_probe_phase = 10;
+              const uint64_t gr1 = pageBytes;
+              const uint32_t cbar = smmuRead(smmu, gr1 + 4ULL * bank);
+              const uint32_t cba2r = smmuRead(smmu, gr1 + 0x800ULL + 4ULL * bank);
+              const uint32_t fsr = smmuRead(smmu, context + 0x58);
+              const uint32_t farLow = smmuRead(smmu, context + 0x60);
+              const uint32_t farHigh = smmuRead(smmu, context + 0x64);
+              const uint32_t fsynr = smmuRead(smmu, context + 0x68);
+              const uint32_t cbfrsynra = smmuRead(smmu, gr1 + 0x400ULL + 4ULL * bank);
+              showHex("EXPECTED UFS SID", expectedUfsSid, 860);
+              showHex("MATCH S2CR", firstS2cr, 920);
+              showHex("CONTEXT BANK", bank, 980);
+              showHex("CONTEXT OFFSET", static_cast<uint32_t>(context), 1040);
+              showHex("CONTEXT CBAR", cbar, 1100);
+              showHex("CONTEXT CBA2R", cba2r, 1160);
+              showHex("CONTEXT SCTLR", smmuRead(smmu, context + 0x00), 1220);
+              showHex("CONTEXT TCR2", smmuRead(smmu, context + 0x10), 1280);
+              showHex("CONTEXT FSR FIRST", fsr, 1340);
+              showHex("CONTEXT FAR LO RAW", farLow, 1400);
+              showHex("CONTEXT FAR HI RAW", farHigh, 1460);
+              showHex("CONTEXT FSYNR0", fsynr, 1520);
+              showHex("GR1 CBFRSYNRA", cbfrsynra, 1580);
+              showHex("CONTEXT FSR SECOND", smmuRead(smmu, context + 0x58), 1640);
+              showHex("GLOBAL GFSR", gfsr, 1700);
+              finish("RESULT: CB FAULT SNAPSHOT - NO DMA TEST");
             }
             nabu_mark_text("STAGE: CONTEXT REGISTER READS", 1700);
             nabu_ufs_register_probe_phase = 9;
@@ -485,10 +516,10 @@ jobs:
             const uint32_t ttbrLow = smmuRead(smmu, context + 0x20);
             const uint32_t ttbrHigh = smmuRead(smmu, context + 0x24);
             const uint32_t tcr = smmuRead(smmu, context + 0x30);
-            showHex("CONTEXT SCTLR", control, 1520);
-            showHex("TTBR0 LO RAW", ttbrLow, 1580);
-            showHex("TTBR0 HI RAW", ttbrHigh, 1640);
-            showHex("CONTEXT TCR", tcr, 1700);
+            if (page != 3) showHex("CONTEXT SCTLR", control, 1520);
+            if (page != 3) showHex("TTBR0 LO RAW", ttbrLow, 1580);
+            if (page != 3) showHex("TTBR0 HI RAW", ttbrHigh, 1640);
+            if (page != 3) showHex("CONTEXT TCR", tcr, 1700);
             // TTBRs are reported only. No page-table memory is mapped or walked.
             nabu_ufs_register_probe_phase = 5;
             finish("RESULT: SMMU SNAPSHOT - NO MAPPING CHANGE");
@@ -504,7 +535,7 @@ jobs:
             nabu_ufs_survey_page = page;
             nabu_ufs_register_probe_phase = 1;
             nabu_mark(92);
-            nabu_mark_text(page == 1 ? "NABU UFS SURVEY V2 - QUEUES" : "NABU UFS SURVEY V2 - SMMU", 680);
+            nabu_mark_text(page == 1 ? "NABU UFS SURVEY V3 - QUEUES" : (page == 2 ? "NABU UFS SURVEY V3 - SMMU" : "NABU UFS SURVEY V3 - CB FAULTS"), 680);
             nabu_mark_text("READ ONLY - NO COMMAND SUBMISSION", 740);
             nabu_mark_text("STAGE: GCC MAP", 800);
             const uintptr_t gcc = mapRegisters(0x00177000ULL, 0x1000ULL, gccMap);
@@ -529,9 +560,9 @@ jobs:
               finish("RESULT: POWER OR CLOCK GATE - SKIPPED");
             }
             nabu_ufs_register_probe_phase = 4;
-            if (page == 2) {
+            if (page == 2 || page == 3) {
               nabu_mark(95);
-              smmuSurvey();
+              smmuSurvey(page);
             }
             nabu_mark_text("STAGE: UFS HC MAP", 800);
             const uintptr_t hc = mapRegisters(0x01d84000ULL, 0x3000ULL, hcMap);
@@ -610,12 +641,12 @@ jobs:
           import json
           p = Path('post64-checkpoints.json')
           m = json.loads(p.read_text())
-          m['parameters'] = '6 GiB ADT, 512 MiB window; passive survey v2; choose queue page 1 or SMMU page 2 explicitly'
+          m['parameters'] = '6 GiB ADT, 512 MiB window; passive survey v3; choose queue page 1, SMMU page 2 or CB fault page 3 explicitly'
           m['checkpoints'].update({
-              '92': 'Passive survey v2 entered; selected page recorded',
+              '92': 'Passive survey v3 entered; selected page recorded',
               '93': 'GCC mapped; before clock/power register reads',
               '94': 'GCC register reads completed; before conditional host mapping',
-              '95': 'Before selected survey: page 1 UFS queue registers, page 2 SMMU registers',
+              '95': 'Before selected survey: page 1 UFS queue registers, page 2 SMMU registers, page 3 CB configuration/faults',
               '96': 'Selected survey report completed; deliberate stop, read RESULT line (can be a skipped or fault-routing report)',
           })
           p.write_text(json.dumps(m, indent=2) + '\n')
@@ -654,7 +685,7 @@ jobs:
           print('All post64 probes are present in generated sources.')
           VERIFY
 
-      - name: Verify linked UFS survey v2
+      - name: Verify linked UFS survey v3
         id: verify_ufs
         run: |
           python3 - <<'VERIFY_UFS'
@@ -704,7 +735,7 @@ jobs:
           for required in ('NativeUfs', 'nabu_ufs_register_probe_phase', 'nabu_ufs_register_probe_hc_read', 'nabu_ufs_survey_page', 'nabu_ufs_survey_complete'):
               assert required in symbols, 'Missing linked probe symbol: ' + required
           assert 'NativeUfsBlock' not in symbols
-          assert b'nabu-ufs-survey-v2\0' in data
+          assert b'nabu-ufs-survey-v3\0' in data
           sha = hashlib.sha256(data).hexdigest()
           report = {
               'purpose': 'SM8150/nabu passive queue and SMMU routing survey before command transport',
@@ -712,7 +743,7 @@ jobs:
               'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
               'upstream_commit': 'eafa7e11ee63ac6a87b4a16019f51bcc1a980bb2',
               'required_boot_argument': 'nabu-ufs-register-probe=1',
-              'required_page_argument': 'nabu-ufs-survey=1 (queues) or nabu-ufs-survey=2 (SMMU)',
+              'required_page_argument': 'nabu-ufs-survey=1 (queues) or nabu-ufs-survey=2 (SMMU) or nabu-ufs-survey=3 (CB config/faults)',
               'expected_ufs_sid': '0x300 from SM8150 device tree; not discovered at runtime',
               'smmu_window': '0x15000000 + 0x100000 from stock nabu vendor device tree',
               'ufs_sid_reference': 'https://github.com/torvalds/linux/blob/v6.12/arch/arm64/boot/dts/qcom/sm8150.dtsi',
@@ -940,7 +971,7 @@ jobs:
           [kits]
           autoload = false
           [ui]
-          title = "nabu UFS survey v2"
+          title = "nabu UFS survey v3"
           logo = true
           console = "auto"
           [[entry]]
@@ -960,6 +991,13 @@ jobs:
           type = "xnu"
           path = "Payloads/kernel.macho"
           args = "serial=3 -enable_kprintf_spam nabu-ufs-register-probe=1 nabu-ufs-survey=2"
+
+          [[entry]]
+          id = "cb-faults"
+          title = "SMMU CB config and faults - read only"
+          type = "xnu"
+          path = "Payloads/kernel.macho"
+          args = "serial=3 -enable_kprintf_spam nabu-ufs-register-probe=1 nabu-ufs-survey=3"
           [[entry]]
           id = "restart"
           title = "Restart"
