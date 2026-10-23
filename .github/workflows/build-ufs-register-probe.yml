@@ -535,7 +535,10 @@ jobs:
 
           personality = tree / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/iokit/DEVELOPMENT/KernelConfigTables.cpo'
           recipe = json.loads(personality.with_suffix('.cpo.json').read_text().strip().rstrip(','))
-          assert '-DXNU_NATIVE_UFS=1' in recipe['arguments'], 'Final personality table still has bootstrap UFS=0'
+          args = recipe['arguments']
+          defines = {arg[2:] for arg in args if arg.startswith('-D') and len(arg) > 2}
+          defines.update(args[i + 1] for i, arg in enumerate(args[:-1]) if arg == '-D')
+          assert 'XNU_NATIVE_UFS=1' in defines, 'UFS enabled flag not found'
           assert b'NativeUfsRoot' in personality.read_bytes(), 'Root-provider personality is absent'
 
           log = Path('UniXNU/out/nabu/logs/kernel.log').read_text(errors='replace')
