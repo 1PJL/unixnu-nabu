@@ -1211,37 +1211,6 @@ jobs:
           }
           } // namespace NabuFat
           
-          // SPDX-License-Identifier: BSD-2-Clause-Patent
-          // Compact report within the display region qualified by Volume P1 on the tablet.
-          namespace NabuFat {
-          alignas(16) static char output[128];static unsigned cursor;
-          __attribute__((noinline)) static void reset() {cursor=0;static_cast<volatile char *>(output)[0]=0;}
-          __attribute__((noinline)) static void text(const char *s) {
-            volatile char *p=output;
-            while(*s && cursor<127)p[cursor++]=*s++;
-            p[cursor]=0;
-          }
-          __attribute__((noinline)) static void hex(uint32_t value) {
-            static const char digits[]="0123456789ABCDEF";volatile char *p=output;
-            for(unsigned i=0;i<8 && cursor<127;++i)p[cursor++]=digits[(value>>(28-4*i))&15];
-            p[cursor]=0;
-          }
-          __attribute__((noinline)) static void field(const char *s,uint32_t value) {text(s);hex(value);text(" ");}
-          template<class Painter> __attribute__((noinline))
-          static void render(Painter &p,const Report &r,End end,NabuGpt::End ge,uint32_t io,uint32_t commands,uint32_t expectedCrc) {
-            p.line("NABU FAT16 V1 - CUST / NABUTEST.TXT - BOUNDED READ ONLY FILE PROOF",16,570,128);
-            reset();field("RESULT ",uint32_t(end));field("GPT ",uint32_t(ge));field("IO ",io);field("STAGE ",r.stage);field("CMD ",commands);
-            p.line(output,16,600,128);
-            reset();field("BYTES ",r.bytes);field("CRC ",r.crc);field("EXPECT ",expectedCrc);field("READS ",r.reads);
-            p.line(output,16,630,128);
-            reset();text("ROOT FIRST8: ");
-            for(unsigned i=0;i<r.listed;++i){text(r.names[i]);text(" ");}
-            p.line(output,16,654,128);
-            reset();field("MIRRORS ",r.mirrors);field("CHAIN ",r.chain);field("CONTENT ",r.content);field("CLUSTERS ",r.clusters);
-            p.line(output,16,678,128);
-            p.line("REPORT COMPLETE / NUMBERS HEX / NO WRITES / NO MOUNT OR FILESYSTEM REPAIR",16,702,128);
-          }
-          } // namespace NabuFat
           
           // SPDX-License-Identifier: BSD-2-Clause-Patent
           // Pure range policy shared by the nabu read-only BSD block device and host tests.
@@ -2762,8 +2731,9 @@ jobs:
           python3 - <<'PARITY'
           from pathlib import Path
           s=Path('UniXNU/scripts/nabu-ufs-register-probe.cpp').read_text()
-          for name in ('nabu-fat-session.h','nabu-fat-core.h','nabu-fat-report.h'):
+          for name in ('nabu-fat-session.h','nabu-fat-core.h'):
               assert Path('UniXNU/scripts',name).read_text() in s
+          assert Path('UniXNU/scripts/nabu-fat-report.h').read_text() not in s
           PARITY
           cat > UniXNU/tests/nabu-ufs-emulator.h <<'FAT_MMIO_EMULATOR'
           // SPDX-License-Identifier: BSD-2-Clause-Patent
