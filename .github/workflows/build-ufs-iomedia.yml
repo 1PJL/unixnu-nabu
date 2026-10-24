@@ -1024,8 +1024,8 @@ jobs:
             unsigned outputBits = 0;
           };
           static Mapping mapping;
-          static OSSharedPtr<IOMemoryMap> liveGccMap, liveHcMap, liveSmmuMap;
-          static IOBufferMemoryDescriptor *pinnedDma; // intentionally retained until reboot, also on timeout
+          static IOBufferMemoryDescriptor *pinnedDma;
+          static OSSharedPtr<IOMemoryMap> liveGccMap, liveHcMap, liveSmmuMap; // intentionally retained until reboot, also on timeout
           static uint8_t *dmaMemory;
           static uint64_t dmaPhysical;
           static unsigned cacheLine;
@@ -3688,6 +3688,7 @@ jobs:
             echo "--- resolved bsd sources ---"
             ls build/obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/*.o 2>/dev/null | wc -l
           }
+          true
 
       - name: Upload artifacts
         if: always()
