@@ -1995,7 +1995,10 @@ jobs:
               shutil.copy2(original, assembled)
               assert original.read_bytes() == assembled.read_bytes()
 
-          board=root/'board.toml'
+          # The selected device repository is GITHUB_WORKSPACE; UniXNU keeps
+          # it external and records that path in out/state.json. Patch the board
+          # consumed by `unixnu build`, not a nonexistent UniXNU/board.toml.
+          board=Path('board.toml')
           bt=board.read_text()
           old='  "audit-storage-interface.py",\n  "build-arm-driver.py NativeUfs",'
           new='  "audit-storage-interface.py",\n  "nabu-static-storage-audit.py",\n  "build-arm-driver.py NativeUfs",\n  "build-native-virtio-bindings.py --component NativeUfs --directory build/native-ufs",'
@@ -2010,7 +2013,6 @@ jobs:
           bindings.write_text(bs)
           shutil.copy2(root/'scripts/nabu-static-storage-audit.py',root/'out/nabu/tree/scripts/nabu-static-storage-audit.py')
           shutil.copy2(bindings,root/'out/nabu/tree/scripts/build-native-virtio-bindings.py')
-          shutil.copy2(board,root/'out/nabu/tree/board.toml')
           assert 'CONFIG_XNU_NATIVE_UFS=y' in (root / 'out/nabu/.config').read_text().splitlines()
           print('NABU_IOMEDIA: NativeUfs subclass uses exact original IOStorageFamily bindings; bootstrap UFS disabled.')
           print('NABU_IOMEDIA: duplicate base-class object and VerifiedRoot stub excluded.')
