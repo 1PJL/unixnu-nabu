@@ -1852,7 +1852,9 @@ jobs:
           require(len(methods) == 190 and methods.count('___cxa_pure_virtual') == 14,
                   'Public storage class dispatch shape changed')
           
-          # Find the one original vtable matching every method that is exported by name.
+          # Find every table matching the inherited/exported portion. Several classes can
+          # share that prefix, so constructor and owned-method evidence below selects the
+          # actual IOBlockStorageDevice table without guessing by address or occurrence.
           blob = read(const['va'], const['size'])
           found = []
           for offset in range(0, len(blob) - (len(methods) + 2) * 8 + 1, 8):
@@ -1861,14 +1863,9 @@ jobs:
               pointers = struct.unpack_from('<' + 'Q' * len(methods), blob, offset + 16)
               if all(pointers[i] == by_name[name] for i, name in enumerate(methods) if name in by_name):
                   found.append((const['va'] + offset, pointers))
-          require(len(found) == 1, 'Cannot uniquely identify original IOBlockStorageDevice vtable')
-          table, pointers = found[0]
           matched = sum(name in by_name for name in methods)
           require(matched == 176, 'Unexpected original kernel binding count')
-          for index, name in enumerate(methods):
-              if name not in by_name:
-                  require(text['va'] <= pointers[index] < text['va'] + text['size'],
-                          'Owned storage method outside original IOStorageFamily text')
+          require(found, 'No original table matches the IOBlockStorageDevice inherited slots')
           
           
           def relative_branch(address, instruction):
@@ -1878,19 +1875,34 @@ jobs:
               return address + immediate * 4
           
           
-          def thunk_names(address):
-              a, load_word, branch = struct.unpack('<3I', read(address, 12))
-              require(a & 0x9f00001f == 0x90000010 and load_word & 0xffc003ff == 0xf9400210 and branch == 0xd61f0200,
-                      'Unqualified original import thunk')
+          def maybe_thunk_names(address):
+              try:
+                  a, load_word, branch = struct.unpack('<3I', read(address, 12))
+              except (ValueError, struct.error):
+                  return []
+              if not (a & 0x9f00001f == 0x90000010 and
+                      load_word & 0xffc003ff == 0xf9400210 and branch == 0xd61f0200):
+                  return []
               immediate = ((a >> 5 & 0x7ffff) << 2) | (a >> 29 & 3)
               if immediate & 0x100000:
                   immediate -= 0x200000
               slot = (address & ~4095) + immediate * 4096 + (load_word >> 10 & 4095) * 8
-              target, = struct.unpack('<Q', read(slot, 8))
+              try:
+                  target, = struct.unpack('<Q', read(slot, 8))
+              except (ValueError, struct.error):
+                  return []
               return exports.get(target, [])
           
           
-          constructors = []
+          def thunk_names(address):
+              names = maybe_thunk_names(address)
+              require(names, 'Unqualified original import thunk')
+              return names
+          
+          
+          # Scan the code once for protected constructors. A qualifying constructor must
+          # install one candidate table and immediately forward to the real IOService C2.
+          constructors_by_table = {}
           for address in range(text['va'], text['va'] + text['size'] - 32, 4):
               words = struct.unpack('<8I', read(address, 32))
               if (words[:2] != (0xa9bf7bfd, 0x910003fd) or words[2] & 0xfc000000 != 0x94000000 or
@@ -1901,16 +1913,26 @@ jobs:
               if immediate & 0x100000:
                   immediate -= 0x200000
               stored = ((address + 12) & ~4095) + immediate * 4096 + (words[4] >> 10 & 4095)
-              if stored == table + 16:
-                  constructors.append((address, relative_branch(address + 8, words[2])))
-          require(len(constructors) == 1 and '__ZN9IOServiceC2EPK11OSMetaClass' in thunk_names(constructors[0][1]),
-                  'Original protected storage constructor changed')
+              target = relative_branch(address + 8, words[2])
+              if '__ZN9IOServiceC2EPK11OSMetaClass' in maybe_thunk_names(target):
+                  constructors_by_table.setdefault(stored - 16, []).append((address, target))
+          
+          qualified = []
+          for candidate_table, candidate_pointers in found:
+              owned_in_text = all(text['va'] <= candidate_pointers[index] < text['va'] + text['size']
+                                  for index, name in enumerate(methods) if name not in by_name)
+              abstract_traps = owned_in_text and all(
+                  read(candidate_pointers[index], 4) == struct.pack('<I', 0xd4200020) for index in (0, 1))
+              constructors = constructors_by_table.get(candidate_table, [])
+              if owned_in_text and abstract_traps and len(constructors) == 1:
+                  qualified.append((candidate_table, candidate_pointers, constructors))
+          require(len(qualified) == 1,
+                  f'Cannot uniquely qualify IOBlockStorageDevice vtable: {len(found)} layout candidates, {len(qualified)} constructor-qualified')
+          table, pointers, constructors = qualified[0]
           destructor = pointers[0] - 4
           word, = struct.unpack('<I', read(destructor, 4))
           require(word & 0xfc000000 == 0x14000000 and '__ZN9IOServiceD2Ev' in thunk_names(relative_branch(destructor, word)),
                   'Original storage base destructor changed')
-          require(all(read(pointers[index], 4) == struct.pack('<I', 0xd4200020) for index in (0, 1)),
-                  'Original abstract complete destructors no longer trap')
           function = pointers[7]
           a, add, ret = struct.unpack('<3I', read(function, 12))
           require(a & 0x9f00001f == 0x90000000 and add & 0xffc003ff == 0x91000000 and ret == 0xd65f03c0,
