@@ -1865,6 +1865,17 @@ jobs:
           owned = [(i, name) for i, name in enumerate(methods) if name not in by_name]
           zero_headers = 0
           best_layout = (-1, -1, -1, 0)
+          
+          
+          def is_brk(address):
+              try:
+                  word, = struct.unpack('<I', read(address, 4))
+              except (ValueError, struct.error):
+                  return False
+              # BRK #imm16: the immediate is diagnostic payload and is not part of the ABI.
+              return word & 0xffe0001f == 0xd4200000
+          
+          
           for offset in range(0, len(blob) - (len(methods) + 2) * 8 + 1, 8):
               if blob[offset:offset + 16] != bytes(16):
                   continue
@@ -1873,8 +1884,7 @@ jobs:
               inherited_matches = sum(pointers[i] == by_name[name] for i, name in inherited)
               abstract_matches = sum(
                   pointers[i] == by_name['___cxa_pure_virtual'] or
-                  (text['va'] <= pointers[i] < text['va'] + text['size'] and
-                   read(pointers[i], 4) == struct.pack('<I', 0xd4200020))
+                  (text['va'] <= pointers[i] < text['va'] + text['size'] and is_brk(pointers[i]))
                   for i in abstract)
               owned_matches = sum(text['va'] <= pointers[i] < text['va'] + text['size'] for i, _ in owned)
               best_layout = max(best_layout, (inherited_matches, abstract_matches, owned_matches,
@@ -1949,7 +1959,7 @@ jobs:
               # runtime pure-virtual handler.
               abstract_traps = all(
                   text['va'] <= candidate_pointers[index] < text['va'] + text['size'] and
-                  read(candidate_pointers[index], 4) == struct.pack('<I', 0xd4200020)
+                  is_brk(candidate_pointers[index])
                   for index in (0, 1))
               constructors = constructors_by_table.get(candidate_table, [])
               if owned_in_text and abstract_traps and len(constructors) == 1:
@@ -1979,7 +1989,7 @@ jobs:
               inherited_kernel_methods=len(inherited), abstract_slots=len(abstract),
               private_abstract_traps=sum(
                   text['va'] <= pointers[index] < text['va'] + text['size'] and
-                  read(pointers[index], 4) == struct.pack('<I', 0xd4200020)
+                  is_brk(pointers[index])
                   for index in abstract),
               abstract_complete_destructors_trap=True,
               live_native_4k=True, compiled_public_class_size=0x90,
