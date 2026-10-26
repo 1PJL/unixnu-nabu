@@ -2084,6 +2084,25 @@ jobs:
           bs=bs.replace("choices=['NativeVirtioBlock', 'NativeRamBlock']", "choices=['NativeVirtioBlock', 'NativeRamBlock', 'NativeUfs']",1)
           assert "mangled = str(len(component)) + component" in bs
           bs=bs.replace("mangled = str(len(component)) + component", "mangled = '12NabuUfsBlock' if component == 'NativeUfs' else str(len(component)) + component",1)
+          # n[1:] already removes the Mach-O prefix. Xcode's demangler must
+          # preserve the remaining Itanium underscore rather than strip twice.
+          assert bs.count("['xcrun', 'c++filt']")==1
+          bs=bs.replace("['xcrun', 'c++filt']", "['xcrun', 'c++filt', '-n']",1)
+          signature_helpers='''if len(demangled) != len(all_names):
+              raise SystemExit('Demangler returned an unexpected number of symbols')
+          readable = dict(zip(all_names, demangled))
+          def method_signature(name):
+              value = readable[name]
+              if '::' not in value:
+                  raise SystemExit('Cannot demangle storage method: ' + name + ' -> ' + value)
+              return value.split('::', 1)[1]
+          '''
+          assert bs.count('readable = dict(zip(all_names, demangled))')==1
+          bs=bs.replace('readable = dict(zip(all_names, demangled))',signature_helpers.rstrip(),1)
+          signature_old="readable[actual].split('::', 1)[1] != readable[expected].split('::', 1)[1]"
+          assert bs.count(signature_old)==1
+          bs=bs.replace(signature_old,'method_signature(actual) != method_signature(expected)',1)
+          ast.parse(bs)
           bindings.write_text(bs)
           shutil.copy2(root/'scripts/nabu-static-storage-audit.py',root/'out/nabu/tree/scripts/nabu-static-storage-audit.py')
           shutil.copy2(bindings,root/'out/nabu/tree/scripts/build-native-virtio-bindings.py')
@@ -2092,6 +2111,16 @@ jobs:
           print('NABU_IOMEDIA: duplicate base-class object and VerifiedRoot stub excluded.')
           PROBE_SETUP
           bash -n UniXNU/scripts/build-xnu-4k-baseline.sh
+          python3 - <<'CHECK_DEMANGLER'
+          import subprocess
+          symbols=['__ZN12NabuUfsBlock5startEP9IOService', '__ZN9IOService5startEPS_',
+                   '__ZNK8OSObject7releaseEi', '__ZN12NabuUfsBlockD1Ev']
+          names=subprocess.check_output(['xcrun','c++filt','-n'],
+              input='\n'.join(s[1:] for s in symbols)+'\n',text=True).splitlines()
+          assert len(names)==len(symbols) and all('::' in name for name in names), repr(names)
+          assert names[0].split('::',1)[1]==names[1].split('::',1)[1], repr(names)
+          print('PASS Xcode demangler: overrides, base-class parameters, const methods and destructor')
+          CHECK_DEMANGLER
           python3 - <<'PROBE_MAPPING'
           from pathlib import Path
           import json
