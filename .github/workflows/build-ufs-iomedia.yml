@@ -1851,12 +1851,14 @@ jobs:
               methods.append(relocations[position])
           require(len(methods) == 190 and methods.count('___cxa_pure_virtual') == 14,
                   'Public storage class dispatch shape changed')
+          require(not any(any(part in name for part in ('doLockUnlockMedia', 'reportLockability',
+                          'reportPollRequirements', 'doDiscard')) for name in methods),
+                  'macOS-only methods in iOS storage reference; correct TargetConditionals.h')
+          require(vtable + 16 + 190 * 8 not in relocations,
+                  'Reference vtable has extra slots; do not truncate a macOS ABI')
           
-          # Find every table matching the concrete inherited/exported portion.  The
-          # reference object uses ___cxa_pure_virtual for its 14 abstract slots, while the
-          # original prelinked IOStorageFamily is allowed to use private BRK stubs there.
-          # Treating those abstract placeholders as ordinary kernel imports rejects the
-          # otherwise exact 162-slot inherited layout.
+          # Require the iOS layout: 162 exact inherited bindings, 14 exact pure-virtual
+          # bindings, and 14 class-owned methods (including two BRK destructors).
           blob = read(const['va'], const['size'])
           found = []
           inherited = [(i, name) for i, name in enumerate(methods)
@@ -1882,30 +1884,18 @@ jobs:
               zero_headers += 1
               pointers = struct.unpack_from('<' + 'Q' * len(methods), blob, offset + 16)
               inherited_matches = sum(pointers[i] == by_name[name] for i, name in inherited)
-              abstract_matches = sum(
-                  pointers[i] == by_name['___cxa_pure_virtual'] or
-                  (text['va'] <= pointers[i] < text['va'] + text['size'] and is_brk(pointers[i]))
-                  for i in abstract)
+              abstract_matches = sum(pointers[i] == by_name['___cxa_pure_virtual'] for i in abstract)
               owned_matches = sum(text['va'] <= pointers[i] < text['va'] + text['size'] for i, _ in owned)
               best_layout = max(best_layout, (inherited_matches, abstract_matches, owned_matches,
                                               const['va'] + offset))
-              abstract_mismatches = [i for i in abstract if not (
-                  pointers[i] == by_name['___cxa_pure_virtual'] or
-                  (text['va'] <= pointers[i] < text['va'] + text['size'] and is_brk(pointers[i])))]
-              # The shipping binary has private implementations in the two destructor
-              # positions where the public abstract reference object has pure-virtual
-              # relocations. Those slots are replaced by the concrete subclass and are
-              # qualified through their adjacent D2 tail-call below.
-              if (inherited_matches == len(inherited) and owned_matches == len(owned) and
-                      abstract_mismatches == [0, 1] and
-                      all(text['va'] <= pointers[i] < text['va'] + text['size'] for i in (0, 1))):
-                  found.append((const['va'] + offset, pointers, abstract_mismatches))
+              if (inherited_matches == len(inherited) and abstract_matches == len(abstract) and
+                      owned_matches == len(owned)):
+                  found.append((const['va'] + offset, pointers))
           matched = sum(name in by_name for name in methods)
           require(matched == 176, 'Unexpected original kernel binding count')
           require(len(inherited) == 162 and len(abstract) == 14,
                   f'Unexpected inherited/abstract split: {len(inherited)}/{len(abstract)}')
-          require(found, 'No original table matches 162 inherited slots, 12 owned slots and '
-                  'the shipping abstract-destructor form; '
+          require(found, 'No original table matches 162 inherited, 14 pure-virtual and 14 owned slots; '
                   f'zero_headers={zero_headers}, best={best_layout[0]}/{best_layout[1]}/{best_layout[2]} '
                   f'at {best_layout[3]:#x}')
           
@@ -1960,40 +1950,19 @@ jobs:
                   constructors_by_table.setdefault(stored - 16, []).append((address, target))
           
           qualified = []
-          for candidate_table, candidate_pointers, candidate_mismatches in found:
-              owned_in_text = all(text['va'] <= candidate_pointers[index] < text['va'] + text['size']
-                                  for index, name in owned)
-              abstract_destructors_private = candidate_mismatches == [0, 1] and all(
-                  text['va'] <= candidate_pointers[index] < text['va'] + text['size'] for index in (0, 1))
+          for candidate_table, candidate_pointers in found:
               constructors = constructors_by_table.get(candidate_table, [])
-              if owned_in_text and abstract_destructors_private and len(constructors) == 1:
-                  qualified.append((candidate_table, candidate_pointers, constructors, candidate_mismatches))
+              abstract_traps = all(is_brk(candidate_pointers[i]) for i in (0, 1))
+              if abstract_traps and len(constructors) == 1:
+                  qualified.append((candidate_table, candidate_pointers, constructors))
           require(len(qualified) == 1,
                   f'Cannot uniquely qualify IOBlockStorageDevice vtable: {len(found)} layout candidates, {len(qualified)} constructor-qualified')
-          table, pointers, constructors, abstract_mismatches = qualified[0]
-          
-          # D2 is a one-instruction tail call beside the private abstract destructor
-          # entries. Find it structurally, without depending on the placeholder opcode.
-          destructor_candidates = []
-          window_start = max(text['va'], min(pointers[0], pointers[1]) - 32)
-          window_end = min(text['va'] + text['size'], max(pointers[0], pointers[1]) + 36)
-          for address in range(window_start & ~3, window_end, 4):
-              word, = struct.unpack('<I', read(address, 4))
-              if word & 0xfc000000 != 0x14000000:
-                  continue
-              target = relative_branch(address, word)
-              names = maybe_thunk_names(target) or exports.get(target, [])
-              if '__ZN9IOServiceD2Ev' in names:
-                  destructor_candidates.append(address)
-          destructor_candidates = sorted(set(destructor_candidates))
-          preferred_destructor = pointers[0] - 4
-          if preferred_destructor in destructor_candidates:
-              destructor = preferred_destructor
-          else:
-              require(len(destructor_candidates) == 1,
-                      f'Original storage base destructor changed: candidates={list(map(hex, destructor_candidates))}, '
-                      f'slots={[hex(pointers[i]) for i in (0, 1)]}')
-              destructor = destructor_candidates[0]
+          table, pointers, constructors = qualified[0]
+          destructor = pointers[0] - 4
+          word, = struct.unpack('<I', read(destructor, 4))
+          require(word & 0xfc000000 == 0x14000000 and
+                  '__ZN9IOServiceD2Ev' in thunk_names(relative_branch(destructor, word)),
+                  'Original storage base destructor changed')
           function = pointers[7]
           a, add, ret = struct.unpack('<3I', read(function, 12))
           require(a & 0x9f00001f == 0x90000000 and add & 0xffc003ff == 0x91000000 and ret == 0xd65f03c0,
@@ -2015,7 +1984,6 @@ jobs:
                   is_brk(pointers[index])
                   for index in abstract),
               abstract_complete_destructors_trap=True,
-              shipping_abstract_destructor_slots=abstract_mismatches,
               live_native_4k=True, compiled_public_class_size=0x90,
               vtable=hex(table + SLIDE), original_metaclass=hex(meta + SLIDE),
               original_protected_constructor=hex(constructors[0][0] + SLIDE),
@@ -2051,6 +2019,23 @@ jobs:
                   raise SystemExit('Missing nabu register-only probe source')
           ''')
           ast.parse(compiler.read_text())
+
+          # The copied macOS SDK header selected four macOS-only virtuals.
+          # Both the annotation object and NativeUfs must consume iOS headers.
+          storage_audit=root/'scripts/audit-storage-interface.py'
+          platform_copy="shutil.copyfile(conditions, out / 'include/TargetConditionals.h')"
+          platform_fix=platform_copy + '''
+          platform_header = out / 'include/TargetConditionals.h'
+          with platform_header.open('a') as stream:
+              stream.write('\\n#undef TARGET_OS_OSX\\n#define TARGET_OS_OSX 0\\n'
+                           '#undef TARGET_OS_IPHONE\\n#define TARGET_OS_IPHONE 1\\n'
+                           '#undef TARGET_OS_IOS\\n#define TARGET_OS_IOS 1\\n')
+          '''
+          replace_once(storage_audit,platform_copy,platform_fix)
+          replace_once(storage_audit,'end = min(end, vtable + 16 + 190 * 8)',
+                       '# Never truncate: macOS has 194 methods; iOS has 190.')
+          ast.parse(storage_audit.read_text())
+          shutil.copy2(storage_audit,root/'out/nabu/tree/scripts/audit-storage-interface.py')
 
           # The bootstrap pass must leave compile records before libNativeUfs.a exists.
           builder = root / 'scripts/unixnu/kernel.py'
